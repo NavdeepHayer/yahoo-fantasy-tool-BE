@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.schemas.league import League
 from app.services.yahoo import get_leagues , get_teams_for_user, yahoo_raw_get
 from app.deps import get_user_id
+from app.services.yahoo_matchups import get_my_weekly_matchups 
 
 router = APIRouter(prefix="/me", tags=["me"])
 
@@ -44,5 +45,35 @@ def my_team(
                     mine = t
                     break
         return {"guid": guid, "team": mine, "teams": teams}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def coerce_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return False
+    return str(val).strip().lower() in {"1","true","t","yes","y","on"}
+  
+@router.get("/matchups")
+def my_matchups(
+    week: int | None = Query(default=None),
+    league_id: str | None = Query(default=None),
+    include_categories: str | bool = Query(default="false"),
+    include_points: str | bool = Query(default="true"),
+    limit: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    try:
+        return get_my_weekly_matchups(
+            db,
+            user_id,
+            week=week,
+            league_id=league_id,
+            include_categories=coerce_bool(include_categories),
+            include_points=coerce_bool(include_points),
+            limit=limit,
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

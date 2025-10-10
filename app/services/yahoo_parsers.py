@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, List, Tuple, Optional
 
 # ---- Small utils (pure, parser-local) ----
 def _get(d: Any, *keys) -> Any:
@@ -286,3 +286,302 @@ def parse_roster(payload: dict, team_id: str) -> Tuple[str, List[dict]]:
             })
 
     return (str(date), out)
+
+
+# --- Minimal scoreboard parsing (league scoreboard;week=N) ---
+
+def _normalize_team_name(team_obj: dict) -> str | None:
+    nm = team_obj.get("name")
+    if isinstance(nm, str):
+        return nm
+    if isinstance(nm, dict):
+        full = nm.get("full")
+        if isinstance(full, str):
+            return full
+    return None
+
+def parse_scoreboard_min(payload: dict) -> dict:
+    """
+    Returns a dict:
+    {
+      "week": <int|None>,
+      "start_date": <str|None>,
+      "end_date": <str|None>,
+      "matchups": [
+        {"team1_key": str, "team1_name": str|None,
+         "team2_key": str, "team2_name": str|None,
+         "status": str|None, "is_playoffs": bool|None}
+      ]
+    }
+    This is a tolerant, minimal extractor (no scores/categories yet).
+    """
+    fc = payload.get("fantasy_content", {})
+    out = {"week": None, "start_date": None, "end_date": None, "matchups": []}
+
+    # Try to find a "scoreboard" node
+    league_node = None
+    L = fc.get("league")
+    if isinstance(L, list) and len(L) >= 2:
+        league_node = L[1]
+    elif isinstance(L, dict):
+        league_node = L
+
+    scoreboard = None
+    if isinstance(league_node, dict):
+        scoreboard = league_node.get("scoreboard") or league_node.get("scoreboards")
+
+    # week meta
+    if isinstance(scoreboard, dict):
+        out["week"] = scoreboard.get("week") or scoreboard.get("current_week")
+        out["start_date"] = scoreboard.get("start_date")
+        out["end_date"] = scoreboard.get("end_date")
+
+        matchups_node = scoreboard.get("matchups")
+        if isinstance(matchups_node, dict):
+            for k, v in matchups_node.items():
+                if not str(k).isdigit() or not isinstance(v, dict):
+                    continue
+                m = v.get("matchup")
+                if not isinstance(m, (dict, list)):
+                    continue
+
+                # normalize matchup object (dict or list of dict fragments)
+                if isinstance(m, list):
+                    m_agg = {}
+                    for part in m:
+                        if isinstance(part, dict):
+                            m_agg.update(part)
+                    m = m_agg
+
+                # read teams inside matchup
+                teams_node = m.get("teams")
+                t1_key = t1_name = t2_key = t2_name = None
+                if isinstance(teams_node, dict):
+                    # Yahoo usually has "0" and "1" entries
+                    for tk, tv in teams_node.items():
+                        if not str(tk).isdigit() or not isinstance(tv, dict):
+                            continue
+                        t = tv.get("team")
+                        # "team" can be list of fragments or dict
+                        if isinstance(t, list):
+                            t_agg = {}
+                            for part in t:
+                                if isinstance(part, dict):
+                                    t_agg.update(part)
+                            t = t_agg
+                        if isinstance(t, dict):
+                            key = t.get("team_key")
+                            name = _normalize_team_name(t)
+                            if t1_key is None:
+                                t1_key, t1_name = key, name
+                            else:
+                                t2_key, t2_name = key, name
+
+                status = m.get("status") or None
+                is_playoffs = bool(m.get("is_playoffs")) if "is_playoffs" in m else None
+
+                if t1_key and t2_key:
+                    out["matchups"].append({
+                        "team1_key": str(t1_key),
+                        "team1_name": t1_name,
+                        "team2_key": str(t2_key),
+                        "team2_name": t2_name,
+                        "status": status,
+                        "is_playoffs": is_playoffs,
+                    })
+
+    return out
+
+def select_matchup_for_team(scoreboard_min: dict, my_team_key: str) -> dict | None:
+    for m in scoreboard_min.get("matchups", []):
+        if m.get("team1_key") == my_team_key or m.get("team2_key") == my_team_key:
+            return m
+    return None
+
+
+# ---- Enriched scoreboard parsing (categories + points) ----
+
+def _flatten_team_obj(obj):
+    """Team node can be a dict or a list of tiny dicts."""
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, list):
+        agg = {}
+        for part in obj:
+            if isinstance(part, dict):
+                agg.update(part)
+        return agg
+    return {}
+
+def _collect_team_stats(team_node) -> dict:
+    """
+    From the team block (which includes a second element holding 'team_stats' etc.),
+    return {stat_id: value} (string values as Yahoo provides).
+    """
+    stats_by_id = {}
+    # team_node is usually [ [<team fields...>], {team_stats: {...}}, {team_points: {...}}, ...]
+    if isinstance(team_node, list) and len(team_node) >= 2 and isinstance(team_node[1], dict):
+        ts = team_node[1].get("team_stats")
+        if isinstance(ts, dict):
+            stats = ts.get("stats")
+            # stats may be a list of {"stat":{stat_id,value}} or dict with numeric keys
+            if isinstance(stats, list):
+                for item in stats:
+                    if isinstance(item, dict):
+                        st = item.get("stat", {})
+                        sid = st.get("stat_id")
+                        val = st.get("value")
+                        if sid is not None:
+                            stats_by_id[str(sid)] = val
+            elif isinstance(stats, dict):
+                for k, v in stats.items():
+                    if not str(k).isdigit() or not isinstance(v, dict):
+                        continue
+                    st = v.get("stat", {})
+                    sid = st.get("stat_id")
+                    val = st.get("value")
+                    if sid is not None:
+                        stats_by_id[str(sid)] = val
+    return stats_by_id
+
+def _collect_team_points(team_node) -> float | None:
+    if isinstance(team_node, list):
+        for part in team_node:
+            if isinstance(part, dict) and "team_points" in part:
+                tp = part["team_points"]
+                if isinstance(tp, dict):
+                    total = tp.get("total")
+                    try:
+                        return float(total) if total is not None else None
+                    except Exception:
+                        return None
+    return None
+
+def parse_scoreboard_enriched(payload: dict) -> dict:
+    """
+    Returns:
+    {
+      "week": int|None,
+      "start_date": str|None,
+      "end_date": str|None,
+      "matchups": [
+        {
+          "status": str|None,
+          "is_playoffs": bool|None,
+          "team1": {"key": str, "name": str|None, "points": float|None, "stats": {stat_id: value}},
+          "team2": {"key": str, "name": str|None, "points": float|None, "stats": {stat_id: value}},
+          "winners": [{"stat_id": str, "winner_team_key": str|None, "is_tied": bool}],
+        }
+      ]
+    }
+    """
+    fc = payload.get("fantasy_content", {})
+    out = {"week": None, "start_date": None, "end_date": None, "matchups": []}
+
+    # locate scoreboard
+    league_node = None
+    L = fc.get("league")
+    if isinstance(L, list) and len(L) >= 2:
+        league_node = L[1]
+    elif isinstance(L, dict):
+        league_node = L
+
+    sb = None
+    if isinstance(league_node, dict):
+        sb = league_node.get("scoreboard") or league_node.get("scoreboards")
+
+    if not isinstance(sb, dict):
+        return out
+
+    out["week"] = (lambda x: int(x) if isinstance(x, str) and x.isdigit() else x)(sb.get("week"))
+    out["start_date"] = sb.get("start_date")
+    out["end_date"] = sb.get("end_date")
+
+    matchups_node = sb.get("matchups")
+    if not isinstance(matchups_node, dict):
+        return out
+
+    for k, v in matchups_node.items():
+        if not str(k).isdigit() or not isinstance(v, dict):
+            continue
+        m = v.get("matchup")
+        if not isinstance(m, (dict, list)):
+            continue
+
+        # flatten matchup
+        if isinstance(m, list):
+            m_agg = {}
+            for part in m:
+                if isinstance(part, dict):
+                    m_agg.update(part)
+            m = m_agg
+
+        status = m.get("status")
+        is_playoffs = bool(m.get("is_playoffs")) if "is_playoffs" in m else None
+
+        # winners list
+        winners = []
+        sw = m.get("stat_winners")
+        if isinstance(sw, list):
+            for item in sw:
+                if isinstance(item, dict):
+                    w = item.get("stat_winner", {})
+                    winners.append({
+                        "stat_id": str(w.get("stat_id")) if w.get("stat_id") is not None else None,
+                        "winner_team_key": w.get("winner_team_key"),
+                        "is_tied": bool(w.get("is_tied")) if "is_tied" in w else False,
+                    })
+        elif isinstance(sw, dict):
+            for ik, iv in sw.items():
+                if not str(ik).isdigit() or not isinstance(iv, dict):
+                    continue
+                w = iv.get("stat_winner", {})
+                winners.append({
+                    "stat_id": str(w.get("stat_id")) if w.get("stat_id") is not None else None,
+                    "winner_team_key": w.get("winner_team_key"),
+                    "is_tied": bool(w.get("is_tied")) if "is_tied" in w else False,
+                })
+
+        # teams
+        t1 = {"key": None, "name": None, "points": None, "stats": {}}
+        t2 = {"key": None, "name": None, "points": None, "stats": {}}
+        teams_node = m.get("teams")
+        if isinstance(teams_node, dict):
+            idx_sorted = sorted([i for i in teams_node.keys() if str(i).isdigit()], key=lambda x: int(x))
+            bucket = []
+            for idx in idx_sorted:
+                tv = teams_node[idx]
+                if isinstance(tv, dict):
+                    bucket.append(tv.get("team"))
+            # Now bucket ~ [team_obj_for_side1, team_obj_for_side2]
+            sides = []
+            for team_node in bucket:
+                if team_node is None:
+                    continue
+                # team details
+                team_fields = None
+                if isinstance(team_node, list) and len(team_node) >= 1:
+                    team_fields = _flatten_team_obj(team_node[0])
+                elif isinstance(team_node, dict):
+                    team_fields = _flatten_team_obj(team_node)
+                else:
+                    team_fields = _flatten_team_obj(team_node)
+
+                key = team_fields.get("team_key")
+                name = _normalize_team_name(team_fields)
+                points = _collect_team_points(team_node)
+                stats = _collect_team_stats(team_node)
+                sides.append({"key": key, "name": name, "points": points, "stats": stats})
+
+            if len(sides) >= 2:
+                t1, t2 = sides[0], sides[1]
+
+        out["matchups"].append({
+            "status": status,
+            "is_playoffs": is_playoffs,
+            "team1": t1,
+            "team2": t2,
+            "winners": winners,
+        })
+
+    return out

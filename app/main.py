@@ -9,6 +9,7 @@ from app.api.routes_me import router as me_router
 from app.api.routes_league import router as league_router
 from app.api.routes_debug import router as debug_router
 
+
 app = FastAPI(title=settings.APP_NAME)
 
 # Create tables on startup (SQLite dev convenience)
@@ -37,3 +38,4 @@ app.include_router(auth_router)
 app.include_router(me_router)
 app.include_router(league_router)
 app.include_router(debug_router)
+
