@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+SQLAlchemy>=2
+python-dotenv
+requests
+requests-oauthlib
+psycopg[binary]
