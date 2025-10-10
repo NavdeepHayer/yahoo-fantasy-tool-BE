@@ -13,29 +13,30 @@ from app.core.config import settings
 
 def _normalize_team_obj(team_node: Any) -> Dict[str, Any]:
     """
-    Yahoo 'team' can be:
-      - dict
-      - list of dicts
-      - nested list [[{...},{...}, ...]]
-    Flatten into a single dict while preserving common nested blocks
-    (team_stats, team_points) as-is when encountered.
+    Yahoo 'team' can be dict OR list-of-dicts OR [ [ {..},{..},... ], {team_stats...}, {team_points...}, ... ].
+    This flattens it into a single dict, making sure to also merge the dicts that come
+    AFTER the first inner list (that's where team_stats / team_points live).
     """
     agg: Dict[str, Any] = {}
 
     def merge(d: dict):
         for k, v in d.items():
-            # keep last wins, yahoo fragments are mostly disjoint
             agg[k] = v
 
     if isinstance(team_node, dict):
         merge(team_node)
     elif isinstance(team_node, list):
-        first = team_node[0] if team_node else None
-        if isinstance(first, list):
-            for part in first:
+        if team_node and isinstance(team_node[0], list):
+            # merge the core fragments inside the first inner list
+            for part in team_node[0]:
                 if isinstance(part, dict):
                     merge(part)
+            # IMPORTANT: also merge any subsequent dict elements (stats, points, etc.)
+            for extra in team_node[1:]:
+                if isinstance(extra, dict):
+                    merge(extra)
         else:
+            # simple list of dicts — merge them all
             for part in team_node:
                 if isinstance(part, dict):
                     merge(part)
