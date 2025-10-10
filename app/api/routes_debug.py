@@ -1,21 +1,23 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs, quote_plus
+from typing import List, Tuple, Optional, Any
 
 from app.db.session import get_db
 from app.deps import get_user_id
 from app.core.config import settings
 from app.core.security import gen_state
 from app.services.yahoo import yahoo_raw_get
-from typing import List, Tuple
 # import the parser directly to test exactly what /me/leagues uses
 from app.services.yahoo import _parse_leagues as __parse_leagues  # type: ignore
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
+
 @router.get("/ping")
 def ping():
     return {"ok": True}
+
 
 @router.get("/auth-url")
 def debug_auth_url():
@@ -30,19 +32,33 @@ def debug_auth_url():
     )
     url = f"{settings.YAHOO_AUTH_URL}?{params}"
     qs = parse_qs(urlparse(url).query)
-    return {"authorization_url": url, "params": {k: (v[0] if len(v)==1 else v) for k,v in qs.items()}}
+    return {"authorization_url": url, "params": {k: (v[0] if len(v) == 1 else v) for k, v in qs.items()}}
+
 
 @router.get("/yahoo/raw")
 def yahoo_raw(
     path: str = Query(..., description="Yahoo path starting with /, e.g. /users;use_login=1/games;game_keys=466/leagues"),
+    limit: int = Query(20, description="Limit number of lines or items returned for preview"),
+    keys_only: bool = Query(False, description="If true, return only top-level keys of the data"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    """
+    Proxy any Yahoo Fantasy path (adds format=json), but trims the output for readability.
+    Use `?keys_only=true` to just see top-level keys.
+    Use `?limit=20` to restrict number of items printed.
+    """
     try:
         data = yahoo_raw_get(db, user_id, path, params={"format": "json"})
-        return {"path": path, "ok": True, "data": data}
+        if keys_only and isinstance(data, dict):
+            return {"path": path, "ok": True, "top_level_keys": list(data.keys())}
+        # Trim deeply nested structures for readability
+        import json
+        snippet = json.dumps(data, indent=2)[:limit * 1000]  # about limit KB
+        return {"path": path, "ok": True, "preview": snippet + ("..." if len(snippet) >= limit * 1000 else "")}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.get("/parse/leagues-by-key")
 def parse_leagues_by_key(
@@ -52,15 +68,25 @@ def parse_leagues_by_key(
 ):
     """Fetch raw leagues for a specific game_key and run them through the same parser as /me/leagues."""
     try:
-        raw = yahoo_raw_get(db, user_id, f"/users;use_login=1/games;game_keys={game_key}/leagues", params={"format":"json"})
+        raw = yahoo_raw_get(
+            db, user_id,
+            f"/users;use_login=1/games;game_keys={game_key}/leagues",
+            params={"format": "json"},
+        )
         parsed = __parse_leagues(raw)
         return {"ok": True, "count": len(parsed), "parsed": parsed}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
+
 @router.get("/parse/teams")
 def parse_teams_debug(
     league_id: str = Query(..., description="Yahoo league key, e.g. 466.l.17802"),
+    path_style: str = Query(
+        "singular",
+        regex="^(singular|plural)$",
+        description="Which Yahoo path style to use",
+    ),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
@@ -68,13 +94,55 @@ def parse_teams_debug(
     Fetch raw teams for league and run through the same parser used by /league/{league_id}/teams.
     """
     try:
-        raw = yahoo_raw_get(db, user_id, f"/leagues;league_keys={league_id}/teams", params={"format":"json"})
+        path = (
+            f"/league/{league_id}/teams"
+            if path_style == "singular"
+            else f"/leagues;league_keys={league_id}/teams"
+        )
+        raw = yahoo_raw_get(db, user_id, path, params={"format": "json"})
         from app.services.yahoo import _parse_teams as __parse_teams  # type: ignore
         parsed = __parse_teams(raw, league_id)
-        return {"ok": True, "count": len(parsed), "parsed": parsed}
+        return {"ok": True, "path": path, "count": len(parsed), "parsed": parsed}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
+
+@router.get("/parse/roster")
+def parse_roster_debug(
+    team_id: str = Query(..., description="Yahoo team key, e.g. 466.l.17802.t.3"),
+    date: Optional[str] = Query(default=None, description="Optional YYYY-MM-DD"),
+    path_style: str = Query(
+        "singular",
+        regex="^(singular|plural)$",
+        description="Which Yahoo path style to use",
+    ),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """
+    Fetch raw roster for team and run through the same parser used by /league/team/{team_id}/roster.
+    """
+    try:
+        date_part = f";date={date}" if date else ""
+        path = (
+            f"/team/{team_id}/roster{date_part}"
+            if path_style == "singular"
+            else f"/teams;team_keys={team_id}/roster{date_part}"
+        )
+        raw = yahoo_raw_get(db, user_id, path, params={"format": "json"})
+        from app.services.yahoo import _parse_roster as __parse_roster  # type: ignore
+        r_date, players = __parse_roster(raw, team_id)
+        return {
+            "ok": True,
+            "path": path,
+            "date": r_date or (date or ""),
+            "count": len(players),
+            "players": players,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/me/games")
 def debug_me_games(
     db: Session = Depends(get_db),
@@ -84,7 +152,7 @@ def debug_me_games(
     Returns the raw games plus the (season, code, game_key) tuples we use for discovery.
     """
     try:
-        raw = yahoo_raw_get(db, user_id, "/users;use_login=1/games", params={"format":"json"})
+        raw = yahoo_raw_get(db, user_id, "/users;use_login=1/games", params={"format": "json"})
         fc = raw.get("fantasy_content", {})
         users = fc.get("users", {})
         user0 = users.get("0", {}).get("user", [])
@@ -118,10 +186,11 @@ def debug_me_games(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @router.get("/me/leagues")
 def debug_me_leagues(
-    sport: str | None = Query(default=None),
-    season: int | None = Query(default=None),
+    sport: Optional[str] = Query(default=None),
+    season: Optional[int] = Query(default=None),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
@@ -130,7 +199,7 @@ def debug_me_leagues(
     then fetches leagues and returns parsed result + the chosen keys.
     """
     try:
-        raw_games = yahoo_raw_get(db, user_id, "/users;use_login=1/games", params={"format":"json"})
+        raw_games = yahoo_raw_get(db, user_id, "/users;use_login=1/games", params={"format": "json"})
         fc = raw_games.get("fantasy_content", {})
         users = fc.get("users", {})
         user0 = users.get("0", {}).get("user", [])
@@ -139,13 +208,16 @@ def debug_me_leagues(
         entries: List[Tuple[int, str, str]] = []
         if isinstance(games_node, dict):
             for k, v in games_node.items():
-                if not str(k).isdigit() or not isinstance(v, dict): 
+                if not str(k).isdigit() or not isinstance(v, dict):
                     continue
                 gitems = v.get("game")
-                if isinstance(gitems, dict): gitems = [gitems]
-                if not isinstance(gitems, list): continue
+                if isinstance(gitems, dict):
+                    gitems = [gitems]
+                if not isinstance(gitems, list):
+                    continue
                 for g in gitems:
-                    if not isinstance(g, dict): continue
+                    if not isinstance(g, dict):
+                        continue
                     code = (g.get("code") or "").lower()
                     gk = g.get("game_key")
                     seas = g.get("season")
@@ -171,14 +243,21 @@ def debug_me_leagues(
         seen = set()
         keys: List[str] = []
         for _, _, gk in entries:
-            if gk in seen: continue
-            seen.add(gk); keys.append(gk)
-            if len(keys) >= 6: break
+            if gk in seen:
+                continue
+            seen.add(gk)
+            keys.append(gk)
+            if len(keys) >= 6:
+                break
 
         # fetch and parse leagues for those keys
         if not keys:
             return {"ok": True, "keys": [], "parsed": []}
-        raw_leagues = yahoo_raw_get(db, user_id, f"/users;use_login=1/games;game_keys={','.join(keys)}/leagues", params={"format":"json"})
+        raw_leagues = yahoo_raw_get(
+            db, user_id,
+            f"/users;use_login=1/games;game_keys={','.join(keys)}/leagues",
+            params={"format": "json"},
+        )
         parsed = __parse_leagues(raw_leagues)
         return {"ok": True, "keys": keys, "count": len(parsed), "parsed": parsed}
     except Exception as e:

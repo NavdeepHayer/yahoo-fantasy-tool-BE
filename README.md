@@ -16,7 +16,7 @@ Python 3.12 · FastAPI · Uvicorn · SQLAlchemy · requests-oauthlib
 1. `python -m venv .venv && source .venv/bin/activate` (Windows: `.\.venv\Scripts\Activate.ps1`)
 2. `pip install -r requirements.txt`
 3. Copy `.env.example` → `.env` and fill in Yahoo OAuth credentials.
-4. `uvicorn app.main:app --host 127.0.0.1 --port 8001`
+4. `uvicorn app.main:app --host 127.0.0.1 --port 8000`
 5. Visit `http://127.0.0.1:8001/docs` for API docs.
 
 ## Yahoo OAuth

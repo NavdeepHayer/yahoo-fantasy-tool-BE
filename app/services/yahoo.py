@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import OAuthToken
 
+from typing import Any, List, Tuple, Optional
+
 # ---- OAuth / Yahoo config ----
 # Use read-only scope while developing (write usually requires extra approval)
 AUTH_SCOPE = ["fspt-r"]
@@ -366,16 +368,46 @@ def get_leagues(
 
 
 
+
 def _parse_teams(payload: dict, league_id: str) -> List[dict]:
     """
-    Ultra-robust teams parser for /leagues;league_keys=<league_id>/teams.
-    Recursively searches for any 'team' nodes and extracts {id, name, manager}.
-    Works across NHL/NBA and various Yahoo list/dict shapes.
+    Robust teams parser for Yahoo's NHL/NBA responses.
+
+    Handles shapes like:
+      fantasy_content.league[1].teams["0"].team == [
+        [ { "team_key": ... }, { "team_id": ... }, { "name": ... }, [], { "url": ... }, ..., { "managers": [ { "manager": {...} } ] } ]
+      ]
+
+    Also tolerates:
+      - singular vs plural endpoints
+      - 'team' as dict or list
+      - managers as list or numeric-keyed dict
     """
     out: List[dict] = []
 
-    def extract_name(team: dict) -> str | None:
-        nm = team.get("name")
+    def flatten_team_node(node: Any) -> Optional[dict]:
+        """
+        Normalize any 'team' node into a single dict of fields.
+        Accepts:
+          - dict → return as-is
+          - list → flatten dicts inside; if node[0] is a list, flatten node[0]
+        """
+        if isinstance(node, dict):
+            return node
+        if isinstance(node, list):
+            # If first element is itself a list, that's the real payload.
+            items = node[0] if node and isinstance(node[0], list) else node
+            agg: dict = {}
+            for part in items:
+                if isinstance(part, dict):
+                    # Merge shallow dicts like {"team_key": "..."} into one object
+                    for k, v in part.items():
+                        agg[k] = v
+            return agg if agg else None
+        return None
+
+    def extract_name(team_obj: dict) -> Optional[str]:
+        nm = team_obj.get("name")
         if isinstance(nm, str):
             return nm
         if isinstance(nm, dict):
@@ -384,99 +416,134 @@ def _parse_teams(payload: dict, league_id: str) -> List[dict]:
                 return full
         return None
 
-    def extract_manager(team: dict) -> str | None:
-        mgrs = _as_list(_get(team, "managers", "0", "manager"))
-        if not mgrs:
-            return None
-        m0 = mgrs[0] if isinstance(mgrs[0], dict) else {}
-        return m0.get("guid") or m0.get("nickname")
+    def extract_manager(team_obj: dict) -> Optional[str]:
+        mgrs = team_obj.get("managers")
+        # Common new style: list of {"manager": {...}}
+        if isinstance(mgrs, list):
+            for item in mgrs:
+                if isinstance(item, dict):
+                    m = item.get("manager")
+                    if isinstance(m, dict):
+                        nick = m.get("nickname")
+                        guid = m.get("guid")
+                        if nick or guid:
+                            return nick or guid
+        # Older style: {"0": {"manager": {...}}, "count": ...}
+        if isinstance(mgrs, dict):
+            for k, v in mgrs.items():
+                if str(k).isdigit() and isinstance(v, dict):
+                    m = v.get("manager")
+                    if isinstance(m, dict):
+                        nick = m.get("nickname")
+                        guid = m.get("guid")
+                        if nick or guid:
+                            return nick or guid
+        return None
 
-    def maybe_take(team_obj: dict):
-        team_key = _get(team_obj, "team_key")
-        name = extract_name(team_obj)
-        mgr = extract_manager(team_obj)
+    def maybe_take(team_node: Any):
+        obj = flatten_team_node(team_node)
+        if not isinstance(obj, dict):
+            return
+        team_key = obj.get("team_key")
+        name = extract_name(obj)
+        manager = extract_manager(obj)
         if team_key and name:
-            out.append({"id": str(team_key), "name": str(name), "manager": mgr})
+            out.append({"id": str(team_key), "name": str(name), "manager": manager})
 
-    # recursive walk to find any 'team' lists/dicts
     def walk(node: Any):
         if isinstance(node, dict):
-            # direct team dict
-            if "team_key" in node and ("name" in node or _get(node, "name", "full")):
-                maybe_take(node)
-
-            # team containers: {"team": {...}} or {"team": [..]}
+            # Direct 'team' container
             if "team" in node:
-                t = node["team"]
-                if isinstance(t, dict):
-                    maybe_take(t)
-                elif isinstance(t, list):
-                    for item in t:
-                        if isinstance(item, dict):
-                            maybe_take(item)
-
-            # keep walking nested dicts/lists
+                maybe_take(node["team"])
+            # Keep walking
             for v in node.values():
                 walk(v)
-
         elif isinstance(node, list):
             for item in node:
                 walk(item)
 
     walk(payload.get("fantasy_content", {}))
-    return out
+
+    # Deduplicate by team id (order-preserving)
+    seen: set[str] = set()
+    deduped: List[dict] = []
+    for t in out:
+        if t["id"] in seen:
+            continue
+        seen.add(t["id"])
+        deduped.append(t)
+
+    return deduped
 
 
+
+from typing import Any, List, Tuple, Optional
 
 def _parse_roster(payload: dict, team_id: str) -> Tuple[str, List[dict]]:
     """
-    Robust parser for /teams;team_keys=<team_id>/roster[;date=YYYY-MM-DD]
+    Robust NHL-friendly roster parser.
+
+    Handles shapes like:
+      fantasy_content.team == [
+        [ { team fields... } ],
+        { "roster": {
+            "coverage_type": "date",
+            "date": "YYYY-MM-DD",
+            "0": {
+              "players": {
+                 "0": { "player": [
+                          [ { "player_key": ... }, { "player_id": ... }, { "name": {...} }, ... ],
+                          { "selected_position": [...] },
+                          { "is_editable": 1 }
+                       ] },
+                 "1": { "player": [ ... ] },
+                 ...
+              }
+            }
+        } }
+      ]
+
     Returns (date, players[ {player_id, name, positions, status} ]).
     """
-    fc = payload.get("fantasy_content", {})
-    teams_node = _get(fc, "teams")
-    if not isinstance(teams_node, dict):
-        return "", []
+    def find_roster(node: Any) -> Optional[dict]:
+        if isinstance(node, dict):
+            if "roster" in node and isinstance(node["roster"], dict):
+                return node["roster"]
+            for v in node.values():
+                r = find_roster(v)
+                if r is not None:
+                    return r
+        elif isinstance(node, list):
+            for item in node:
+                r = find_roster(item)
+                if r is not None:
+                    return r
+        return None
 
-    team_entry = _get(teams_node, "0", "team")
-    # team_entry is usually a list: [ {team_fields...}, {"roster": {...}} ]
-    roster_node = None
-    if isinstance(team_entry, list):
-        for item in team_entry:
-            if isinstance(item, dict) and "roster" in item:
-                roster_node = item["roster"]
-                break
-    elif isinstance(team_entry, dict):
-        roster_node = team_entry.get("roster")
+    def flatten_player_node(pnode: Any) -> Optional[dict]:
+        """
+        Normalize any 'player' node into a single dict of fields.
+        Accepts:
+          - dict → return as-is
+          - list → if first element is a list, flatten that; otherwise flatten the list
+        """
+        if isinstance(pnode, dict):
+            return pnode
+        if isinstance(pnode, list):
+            core = pnode[0] if pnode and isinstance(pnode[0], list) else pnode
+            agg: dict = {}
+            for part in core:
+                if isinstance(part, dict):
+                    # shallow merge of tiny dicts ({"player_id": "..."}, {"name": {...}}, etc.)
+                    for k, v in part.items():
+                        agg[k] = v
+            return agg or None
+        return None
 
-    if not isinstance(roster_node, dict):
-        return "", []
-
-    # date can be at roster["date"] or sometimes inside the "0" child
-    date = roster_node.get("date") or _get(roster_node, "0", "date") or ""
-
-    # players typically at roster["0"]["players"]
-    players_node = _get(roster_node, "0", "players")
-    players_list: List[dict] = []
-    if isinstance(players_node, dict):
-        for k, v in players_node.items():
-            if str(k).isdigit() and isinstance(v, dict):
-                p = v.get("player")
-                if isinstance(p, dict):
-                    players_list.append(p)
-                elif isinstance(p, list):
-                    players_list.extend([i for i in p if isinstance(i, dict)])
-    elif isinstance(players_node, list):
-        players_list.extend([i for i in players_node if isinstance(i, dict)])
-
-    out: List[dict] = []
-    for p in players_list:
-        pid = _get(p, "player_id")
-        # NHL sometimes nests name under {"name": {"full": "..."}}
-        pname = _get(p, "name", "full") or p.get("name")
-        # positions may be a list of dicts under "eligible_positions" or a single "position"
+    def extract_positions(obj: dict) -> List[str]:
+        # Eligible positions typically as a list of {"position": "C"} dicts
         positions: List[str] = []
-        pos_raw = _get(p, "eligible_positions", "position")
+        pos_raw = obj.get("eligible_positions")
         if isinstance(pos_raw, list):
             for pr in pos_raw:
                 if isinstance(pr, dict) and "position" in pr:
@@ -487,8 +554,68 @@ def _parse_roster(payload: dict, team_id: str) -> Tuple[str, List[dict]]:
             positions.append(str(pos_raw["position"]))
         elif isinstance(pos_raw, str):
             positions.append(pos_raw)
+        # Some responses also include "display_position": "C,LW" — you can choose to include it if you want:
+        # dp = obj.get("display_position"); if isinstance(dp, str): positions.extend([p.strip() for p in dp.split(",") if p.strip()])
+        return positions
 
-        status = _get(p, "status") or None
+    fc = payload.get("fantasy_content", {})
+    roster = find_roster(fc)
+    if not isinstance(roster, dict):
+        return "", []
+
+    # Date can be at roster["date"] or roster["0"]["date"]
+    date = roster.get("date") or (isinstance(roster.get("0"), dict) and roster["0"].get("date")) or ""
+
+    # Players normally at roster["0"]["players"]
+    players_container = None
+    r0 = roster.get("0")
+    if isinstance(r0, dict):
+        players_container = r0.get("players")
+    if players_container is None:
+        # Fallback: search anywhere under roster for a "players" dict
+        def find_players(n: Any) -> Optional[dict]:
+            if isinstance(n, dict):
+                if "players" in n and isinstance(n["players"], dict):
+                    return n["players"]
+                for v in n.values():
+                    fp = find_players(v)
+                    if fp is not None:
+                        return fp
+            elif isinstance(n, list):
+                for itm in n:
+                    fp = find_players(itm)
+                    if fp is not None:
+                        return fp
+            return None
+        players_container = find_players(roster)
+
+    if not isinstance(players_container, dict):
+        return str(date), []
+
+    # Collect each player's "player" node and flatten it
+    players_raw: List[dict] = []
+    for k, v in players_container.items():
+        if not str(k).isdigit() or not isinstance(v, dict):
+            continue
+        p = v.get("player")
+        if p is None:
+            continue
+        flat = flatten_player_node(p)
+        if isinstance(flat, dict):
+            players_raw.append(flat)
+
+    # Normalize final fields
+    out: List[dict] = []
+    for obj in players_raw:
+        pid = obj.get("player_id")
+        pname = None
+        nm = obj.get("name")
+        if isinstance(nm, dict):
+            pname = nm.get("full") or nm.get("name")
+        elif isinstance(nm, str):
+            pname = nm
+        positions = extract_positions(obj)
+        status = obj.get("status") or None
         if pid and pname:
             out.append({
                 "player_id": str(pid),
@@ -500,17 +627,35 @@ def _parse_roster(payload: dict, team_id: str) -> Tuple[str, List[dict]]:
     return (str(date), out)
 
 
-# Public wrappers used by routes (explicit user_id so we don't hide it)
+
 def get_teams_for_user(db: Session, user_id: str, league_id: str) -> List[dict]:
+    """
+    Public wrapper with automatic endpoint fallback.
+    Tries singular (/league/<key>/teams) first; if empty, tries plural (/leagues;league_keys=<key>/teams).
+    """
     if settings.YAHOO_FAKE_MODE:
         return [
             {"id": f"{league_id}.t.1", "name": "Nav’s Team", "manager": "Nav"},
             {"id": f"{league_id}.t.2", "name": "Rival Squad", "manager": "Alex"},
         ]
-    payload = _yahoo_get(db, user_id, f"/leagues;league_keys={league_id}/teams")
-    return _parse_teams(payload, league_id)
+
+    # Try singular path first (usually cleaner)
+    payload = _yahoo_get(db, user_id, f"/league/{league_id}/teams")
+    teams = _parse_teams(payload, league_id)
+    if teams:
+        return teams
+
+    # Fallback: plural/semicolon style
+    payload2 = _yahoo_get(db, user_id, f"/leagues;league_keys={league_id}/teams")
+    teams2 = _parse_teams(payload2, league_id)
+    return teams2
+
 
 def get_roster_for_user(db: Session, user_id: str, team_id: str, date: Optional[str] = None) -> dict:
+    """
+    Public wrapper with automatic endpoint fallback.
+    Tries singular (/team/<key>/roster) first; if empty, tries plural (/teams;team_keys=<key>/roster).
+    """
     if settings.YAHOO_FAKE_MODE:
         return {
             "team_id": team_id,
@@ -520,10 +665,20 @@ def get_roster_for_user(db: Session, user_id: str, team_id: str, date: Optional[
                 {"player_id": "nba.p.2544", "name": "LeBron James", "positions": ["SF", "PF"], "status": "BN"},
             ],
         }
+
     date_part = f";date={date}" if date else ""
-    payload = _yahoo_get(db, user_id, f"/teams;team_keys={team_id}/roster{date_part}")
+
+    # Try singular first
+    payload = _yahoo_get(db, user_id, f"/team/{team_id}/roster{date_part}")
     r_date, players = _parse_roster(payload, team_id)
-    return {"team_id": team_id, "date": r_date or (date or ""), "players": players}
+    if players:
+        return {"team_id": team_id, "date": r_date or (date or ""), "players": players}
+
+    # Fallback to plural
+    payload2 = _yahoo_get(db, user_id, f"/teams;team_keys={team_id}/roster{date_part}")
+    r_date2, players2 = _parse_roster(payload2, team_id)
+    return {"team_id": team_id, "date": r_date2 or (date or ""), "players": players2}
+
 
 
 # ---- Debug helper (used by /debug/yahoo/raw) ----
