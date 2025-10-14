@@ -10,8 +10,7 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str = "placeholder"
 
     CORS_ORIGINS: List[AnyHttpUrl] | List[str] = []
-
-    DATABASE_URL: str = "sqlite:///./dev.db"
+    DATABASE_URL: str = ""
 
     YAHOO_CLIENT_ID: str = ""
     YAHOO_CLIENT_SECRET: str = ""
