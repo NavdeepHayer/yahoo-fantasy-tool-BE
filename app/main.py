@@ -1,45 +1,55 @@
+# app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from app.core.config import settings
-from app.db.engine import engine
-from app.db.models import Base
-from app.api.routes_auth import router as auth_router
-from app.api.routes_me import router as me_router
-from app.api.routes_league import router as league_router
+from app.api import routes_auth, routes_me, routes_league
+
+import json
 
 app = FastAPI(title=settings.APP_NAME)
 
-# Create tables on startup (SQLite dev convenience)
-Base.metadata.create_all(bind=engine)
+# --- Strict CORS setup ---
+def _parse_origins(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        v = value.strip()
+        if v.startswith("["):
+            # value came from .env as a JSON-ish list
+            try:
+                return json.loads(v)
+            except Exception:
+                pass
+        # single origin string
+        return [v] if v else []
+    return []
 
-# CORS (dev-friendly)
-origins = [*settings.CORS_ORIGINS] if settings.CORS_ORIGINS else []
+ALLOWED_ORIGINS = _parse_origins(getattr(settings, "CORS_ORIGINS", []))
+
+# Fail fast if empty in non-local envs
+# (optional; comment out if you want the API callable from any origin-less client like curl)
+# if settings.APP_ENV.lower() != "local" and not ALLOWED_ORIGINS:
+#     raise RuntimeError("CORS_ORIGINS must be set in non-local environments")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins or ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,             # needed if your frontend ever sends cookies
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Requested-With",
+        "X-User-Id",                    # if you keep using this in dev
+    ],
+    max_age=600,                        # cache preflight for 10 minutes
 )
 
-@app.get("/")
-def root():
-    return {"hello": "world"}
+# Routers
+app.include_router(routes_auth.router)
+app.include_router(routes_me.router)
+app.include_router(routes_league.router)
 
 @app.get("/health")
 def health():
     return {"ok": True, "env": settings.APP_ENV}
-
-
-
-@app.on_event("startup")
-def startup_event():
-    Base.metadata.create_all(bind=engine)
-
-# Routers
-app.include_router(auth_router)
-app.include_router(me_router)
-app.include_router(league_router)
-
-
