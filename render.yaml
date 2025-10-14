@@ -3,6 +3,7 @@ services:
     name: yahoo-fantasy-be
     env: docker
     plan: free
+    dockerfilePath: ./Dockerfile   # <— matches your current filename
     autoDeploy: true
     healthCheckPath: /health
     envVars:
