@@ -31,6 +31,11 @@ ALLOWED_ORIGINS = _parse_origins(getattr(settings, "CORS_ORIGINS", []))
 # if settings.APP_ENV.lower() != "local" and not ALLOWED_ORIGINS:
 #     raise RuntimeError("CORS_ORIGINS must be set in non-local environments")
 
+# ✅ Validate configuration at boot
+@app.on_event("startup")
+def _validate_config():
+    settings.validate_at_startup()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

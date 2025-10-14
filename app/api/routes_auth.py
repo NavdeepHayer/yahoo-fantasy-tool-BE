@@ -32,7 +32,7 @@ def auth_login(debug: bool = False):
         key="oauth_state",
         value=state,
         httponly=True,
-        secure=True,  # set to True if you are using HTTPS
+        secure=settings.COOKIE_SECURE,  # set to True if you are using HTTPS
         max_age=600,
         samesite="lax"
     )
