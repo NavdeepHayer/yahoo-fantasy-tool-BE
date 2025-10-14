@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.services.yahoo import get_authorization_url
 from requests_oauthlib import OAuth2Session
 from app.services.yahoo_profile import upsert_user_from_yahoo
+from app.core.auth import create_session_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -82,6 +83,26 @@ def auth_callback(
     )
     db.add(rec)
     db.commit()
+    
+    # 🎫 Create a new session token for this user
+    session_token = create_session_token(guid)
+    response = RedirectResponse("/")  # redirect back to your frontend root
+    # secure=True only when running behind HTTPS (e.g. ngrok or production)
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=settings.APP_ENV != "local",
+        max_age=7 * 24 * 3600,
+        samesite="lax",
+    )
+    return response
 
-    # Redirect back to root after successful login
-    return RedirectResponse("/")
+@router.post("/logout")
+def auth_logout(response: Response):
+    """
+    Clears the session cookie. Returns 204 No Content.
+    """
+    response = Response(status_code=204)
+    response.delete_cookie("session_token")
+    return response
