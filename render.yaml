@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: yahoo-fantasy-be
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        sync: false         # set in dashboard (Fernet key)
+      - key: DATABASE_URL
+        sync: false
+      - key: YAHOO_CLIENT_ID
+        sync: false
+      - key: YAHOO_CLIENT_SECRET
+        sync: false
+      - key: YAHOO_REDIRECT_URI
+        sync: false
+      - key: YAHOO_AUTH_URL
+        value: https://api.login.yahoo.com/oauth2/request_auth
+      - key: YAHOO_TOKEN_URL
+        value: https://api.login.yahoo.com/oauth2/get_token
+      - key: YAHOO_API_BASE
+        value: https://fantasysports.yahooapis.com/fantasy/v2
+      - key: YAHOO_FAKE_MODE
+        value: "false"
+      - key: CORS_ORIGINS
+        sync: false
