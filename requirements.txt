@@ -1,10 +1,21 @@
-fastapi
-uvicorn[standard]
-pydantic-settings
-SQLAlchemy>=2
-python-dotenv
-requests
-requests-oauthlib
-cryptography
-psycopg2-binary
-python-dotenv
+# Core web + settings
+fastapi>=0.110
+uvicorn[standard]>=0.23
+pydantic-settings>=2.2
+
+# HTTP / OAuth
+requests>=2.31
+requests-oauthlib>=1.3.1
+
+# Data / DB
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1      # Use psycopg3 for Postgres (Neon). If you prefer psycopg2, remove this and use psycopg2-binary instead.
+
+# Security (token encryption)
+cryptography>=42.0
+
+# Env loading
+python-dotenv>=1.0
+
+# Optional perf (uncomment if you want faster JSON responses)
+# orjson>=3.9

@@ -1,159 +1,241 @@
-# 🏀 Yahoo Fantasy Analytics – Backend (FastAPI)
+# Yahoo Fantasy Tool — Backend (FastAPI)
 
-A **FastAPI** backend that connects to **Yahoo Fantasy Sports (OAuth2)**, fetches your leagues, teams, rosters, and matchups, and exposes clean, normalized APIs for a modern React/TypeScript frontend.  
-Currently supports **NBA** and **NHL**, with flexible parsing for other Yahoo Fantasy sports.
+A local-first FastAPI backend that connects to Yahoo Fantasy Sports (OAuth2), pulls your leagues/teams/rosters, and exposes tidy endpoints your React/TypeScript frontend can consume for analytics.
 
----
+## Features
 
-## 🚀 Features
-
-- ✅ **Yahoo OAuth2 (read-only)** — secure authentication and token refresh handling  
-- 🏆 **League discovery** — returns all user leagues with season, sport, and scoring categories  
-- 👥 **Teams & rosters** — clean, flattened structure across all Yahoo JSON shapes  
-- 📊 **Matchups & weekly results** — points + category-level breakdown for each matchup  
-- 🧠 **Smart data normalization** — auto-detects and parses all Yahoo Fantasy object variants  
-- 🧰 **Robust debug tools** — `/debug/yahoo/raw` for inspecting raw Yahoo payloads  
-- ⚙️ **Cross-sport compatible** — supports NHL/NBA JSON layouts (more coming)
+- Yahoo OAuth2 (read-only scope `fspt-r`)
+- Secure OAuth flow with **state** validation (CSRF defense)
+- **Encrypted** token storage (Fernet)
+- Auto-refresh tokens on 401 and persist new token row
+- League discovery & parsing across sports (NBA/NHL/MLB/NFL)
+- Teams & roster endpoints (sport-agnostic parsers)
+- Strict CORS (frontend whitelist)
+- **No debug routes** in production (removed for security)
 
 ---
 
-## 🧩 Stack
+## Tech Stack
 
-**Python 3.12** · **FastAPI** · **Uvicorn** · **SQLAlchemy** · **requests-oauthlib**  
-Optional: PostgreSQL (for persistent storage), but local in-memory works too.
+- **Python 3.12**, **FastAPI**, **Uvicorn**
+- **SQLAlchemy** + **PostgreSQL** (Neon)
+- **requests**, **requests-oauthlib**
+- **pydantic-settings** for config
+- **cryptography** (Fernet) for token encryption
 
 ---
 
-## 🛠 Getting Started
+## Directory Layout
 
-```bash
-# 1️⃣ Create virtual environment
-python -m venv .venv
-source .venv/bin/activate    # Windows: .\.venv\Scripts\Activate.ps1
+Yahoo-Fantasy-BE/
+├─ app/
+│ ├─ api/
+│ │ ├─ routes_auth.py
+│ │ ├─ routes_me.py
+│ │ └─ routes_league.py
+│ ├─ core/
+│ │ ├─ config.py
+│ │ ├─ crypto.py
+│ │ └─ security.py
+│ ├─ db/
+│ │ ├─ models.py
+│ │ └─ session.py
+│ ├─ services/
+│ │ ├─ yahoo.py
+│ │ ├─ yahoo_client.py
+│ │ ├─ yahoo_oauth.py
+│ │ ├─ yahoo_parsers.py
+│ │ ├─ yahoo_profile.py
+│ │ └─ yahoo_matchups.py
+│ └─ main.py
+├─ .env
+├─ requirements.txt
+├─ README.md
+└─ .gitignore
 
-# 2️⃣ Install dependencies
-pip install -r requirements.txt
+yaml
+Copy code
 
-# 3️⃣ Set up environment variables
-cp .env.example .env
-# Fill in your Yahoo OAuth credentials
+---
 
-# 4️⃣ Start the server
+## Prerequisites
+
+- Python 3.12
+- Postgres (Neon recommended)
+- Yahoo Developer App (Client ID/Secret, registered redirect URI)
+- (Optional) **ngrok** for remote OAuth callback while developing
+
+---
+
+## Setup
+
+1. **Clone & install**
+   ```bash
+   python -m venv .venv
+   . .venv/bin/activate              # Windows: .venv\Scripts\activate
+   pip install -r requirements.txt
+Create .env
+
+env
+Copy code
+# App
+APP_NAME=YahooFantasyAPI
+APP_ENV=local
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","https://YOUR-NGROK-SUBDOMAIN.ngrok-free.app"]
+SECRET_KEY=change_me_dev_only
+
+# Must be a valid Fernet key (44-char urlsafe base64). Generate with:
+# python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+ENCRYPTION_KEY=REPLACE_WITH_FERNET_KEY
+
+# Database (Neon example)
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/neondb?sslmode=require&channel_binding=require
+
+# Yahoo OAuth
+YAHOO_CLIENT_ID=...
+YAHOO_CLIENT_SECRET=...
+YAHOO_REDIRECT_URI=https://YOUR-NGROK-SUBDOMAIN.ngrok-free.app/auth/callback
+YAHOO_AUTH_URL=https://api.login.yahoo.com/oauth2/request_auth
+YAHOO_TOKEN_URL=https://api.login.yahoo.com/oauth2/get_token
+YAHOO_API_BASE=https://fantasysports.yahooapis.com/fantasy/v2
+
+# Toggle stub mode off in real usage
+YAHOO_FAKE_MODE=false
+Run the API
+
+bash
+Copy code
 uvicorn app.main:app --host 127.0.0.1 --port 8000
+Local docs: http://127.0.0.1:8000/docs
 
-# 5️⃣ Open interactive docs
-http://127.0.0.1:8000/docs
+(Optional) ngrok for OAuth
 
-🔐 Yahoo OAuth Setup
+bash
+Copy code
+ngrok http http://127.0.0.1:8000
+Set YAHOO_REDIRECT_URI in .env and in the Yahoo Developer Console to:
 
-Go to Yahoo Developer Console
-.
+arduino
+Copy code
+https://<your-ngrok>.ngrok-free.app/auth/callback
+When using ngrok, start login via the ngrok domain:
 
-Create a new app with scope:
+arduino
+Copy code
+https://<your-ngrok>.ngrok-free.app/auth/login
+OAuth Flow (Brief)
+GET /auth/login
 
-fspt-r
+Sets an oauth_state cookie and redirects to Yahoo.
 
+Yahoo redirects to GET /auth/callback?code=...&state=...
 
-Set Redirect URI to:
+Verifies state from cookie.
 
-http://127.0.0.1:8000/auth/callback
+Exchanges code for tokens.
 
+Encrypts and stores tokens (access + refresh).
 
-Flow:
+Persists user profile (GUID/nickname).
 
-GET /auth/login → opens Yahoo login
+Redirects to /.
 
-Redirected to /auth/callback?code=...
+Common pitfalls
 
-Tokens are saved automatically; refresh handled transparently.
+Invalid or missing OAuth state → You didn’t start from the same domain as the callback (use ngrok URL for both login + callback).
 
-🧠 API Endpoints Overview
-Endpoint	Description	Example
-GET /health	Health check	{ "ok": true, "env": "local" }
-GET /me/leagues	Lists user’s leagues with filters (sport, season, game_key)	/me/leagues?sport=nhl&season=2025
-GET /me/my-team	Returns your own team info (GUID, team_id, and all league teams)	/me/my-team?league_id=465.l.34067
-GET /me/matchups	Returns your weekly matchup with category and point breakdown	/me/matchups?league_id=465.l.34067&week=1&include_points=true&include_categories=true
-GET /league/{league_id}/teams	Lists all teams for a league	/league/465.l.34067/teams
-GET /league/team/{team_id}/roster	Fetches roster for a given date	/league/team/465.l.34067.t.11/roster?date=2025-10-10
-GET /debug/yahoo/raw?path=...	Raw Yahoo API passthrough for inspection	/debug/yahoo/raw?path=/league/465.l.34067/scoreboard;week=1
-GET /debug/me/games	Lists all Yahoo games tied to your account	
-GET /debug/me/leagues	Lists all leagues with raw Yahoo output	
-🧾 Example Response – /me/matchups
-{
-  "user_id": "local-dev",
-  "week": 1,
-  "items": [
-    {
-      "league_id": "465.l.34067",
-      "week": 1,
-      "start_date": "2025-10-07",
-      "end_date": "2025-10-12",
-      "team_id": "465.l.34067.t.11",
-      "team_name": "Tkachuk Norris",
-      "opponent_team_id": "465.l.34067.t.1",
-      "opponent_team_name": "Hughes Your Daddy",
-      "status": "midevent",
-      "is_playoffs": false,
-      "score": {
-        "points": { "me": "7", "opp": "2" },
-        "categories": { "wins": 7, "losses": 2, "ties": 1 },
-        "category_breakdown": [
-          { "name": "G", "me": "2", "opp": "6", "leader": 2 },
-          { "name": "A", "me": "8", "opp": "8", "leader": 0 },
-          { "name": "+/-", "me": "2", "opp": "-4", "leader": 1 },
-          ...
-        ]
-      }
-    }
-  ]
-}
+Fernet key errors → Ensure ENCRYPTION_KEY is a valid urlsafe base64 32-byte key (44 chars, ends with =).
 
-🧪 Postman Setup
+API Endpoints
+Until full auth is added, endpoints expect a user_id (Yahoo GUID) via query/header (X-User-Id).
+You can discover your GUID by calling Yahoo’s /users;use_login=1 after login, or from the stored user record.
 
-A ready-to-import Postman collection is available:
+Health
+GET /health → {"ok": true, "env": "local"}
 
-Yahoo Fantasy Tool (BE) – Me.postman_collection.json
+OAuth
+GET /auth/login → redirect to Yahoo
 
+GET /auth/callback?code=...&state=... → token exchange & store
 
-Or manually add these endpoints under your existing collection:
+Me
+GET /me/leagues
 
-/me/my-team
-→ Fetches your GUID, your team, and all teams in the league.
+Query: sport, season, game_key
 
-/me/matchups
-→ Returns your current or specified week’s matchup including points + categories.
+Returns: array of leagues with merged stat categories
 
-Environment Variable:
+GET /me/matchups
 
-{{base_url}} = http://127.0.0.1:8000
+Query: league_id, week, include_points, include_categories, limit
 
-🧩 Internal Architecture
-app/
-├── api/
-│   ├── routes_me.py          # /me endpoints (leagues, my-team, matchups)
-│   └── routes_debug.py       # /debug endpoints
-├── services/
-│   ├── yahoo.py              # Core Yahoo service and helpers
-│   ├── yahoo_matchups.py     # Matchup parsing and normalization
-│   ├── yahoo_client.py       # Handles OAuth and Yahoo API requests
-├── db/
-│   ├── session.py            # DB session and dependency
-│   ├── models.py             # Optional persistent models
-│   └── config.py             # DB and environment setup
-├── main.py                   # FastAPI app entrypoint
+Returns: parsed current/past week matchups (points + categories if requested)
 
-🧭 Roadmap
+GET /me/my-team
 
-Next:
+Query: league_id
 
- 🧮 Add stat-name mapping for categories (G → Goals, etc.)
+Returns: your team info (by GUID) + teams list
 
- 🕹 NBA integration testing once games start
+League
+GET /league/{league_id}/teams
 
- 🗓 Weekly matchup caching (PostgreSQL + scheduler)
+Returns: teams in a league (with manager guid/nickname)
 
- ⚡ API response caching layer (Redis / Memory)
+GET /league/team/{team_id}/roster
 
- 🎯 Predictive features (category win probability)
+Query: date (YYYY-MM-DD)
 
- 📈 Player projections + waiver/streamer recommendations
+Returns: team roster + positions
+
+Security Hardening (Current)
+✅ State verification in OAuth callback (CSRF defense)
+
+✅ Encrypted token storage (cryptography.Fernet)
+
+✅ Strict CORS (only trusted frontend origins)
+
+✅ Removed /debug routes in production
+
+🔜 Plan: replace manual user_id with real user sessions/JWT
+
+Development Tips
+GUID discovery: after login, you can call the Yahoo /users;use_login=1 endpoint through the backend to read your GUID from the stored profile or initial calls.
+
+Token refresh: if access token expires, the backend will decrypt the refresh token, rotate tokens, and persist a new encrypted row.
+
+Troubleshooting
+400 “Invalid or missing OAuth state”
+
+Start login at the same domain as YAHOO_REDIRECT_URI (e.g., ngrok URL for both).
+
+Ensure your client preserves cookies and follows redirects.
+
+“Fernet key must be 32 url-safe base64-encoded bytes.”
+
+Regenerate a key:
+
+bash
+Copy code
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Paste into .env as ENCRYPTION_KEY=....
+
+404 for /me/...
+
+Don’t use a literal {{base_url}} placeholder. Use http://127.0.0.1:8000 or your ngrok URL.
+
+CORS errors in browser
+
+Add your frontend origin to CORS_ORIGINS list and restart.
+
+Deployment (High-Level)
+Set environment variables (no secrets in code).
+
+Use a production Postgres (Neon).
+
+Run with Uvicorn/Gunicorn (multiple workers), HTTPS termination in front (platform managed).
+
+Make sure CORS_ORIGINS reflects your real frontend domains.
+
+Keep /debug code out of the deployed build.
+
