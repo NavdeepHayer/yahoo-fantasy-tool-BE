@@ -2,6 +2,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.23
 pydantic-settings>=2.2
+gunicorn>=21.2.0
 
 # HTTP / OAuth
 requests>=2.31
