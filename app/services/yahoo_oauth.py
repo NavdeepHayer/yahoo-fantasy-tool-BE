@@ -5,6 +5,7 @@ from requests_oauthlib import OAuth2Session
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.crypto import decrypt_value, encrypt_value
 from app.db.models import OAuthToken
 
 import os, json
@@ -75,8 +76,8 @@ def yahoo_api_get(path: str, access_token: str) -> dict:
 def _persist_token(db: Session, user_id: str, token: dict) -> OAuthToken:
     rec = OAuthToken(
         user_id=user_id,
-        access_token=token.get("access_token", ""),
-        refresh_token=token.get("refresh_token"),
+        access_token=encrypt_value(token.get("access_token", "")),
+        refresh_token=encrypt_value(token.get("refresh_token")) if token.get("refresh_token") else None,
         expires_in=token.get("expires_in"),
         token_type=token.get("token_type"),
         scope=token.get("scope"),
@@ -100,9 +101,11 @@ def get_latest_token(db: Session, user_id: str) -> Optional[OAuthToken]:
 def refresh_token(db: Session, user_id: str, tok: OAuthToken) -> OAuthToken:
     if not tok.refresh_token:
         raise RuntimeError("Yahoo token expired and no refresh_token is available.")
+    plain_refresh = decrypt_value(tok.refresh_token)  # <-- decrypt before sending
+
     data = {
         "grant_type": "refresh_token",
-        "refresh_token": tok.refresh_token,
+        "refresh_token": plain_refresh,
         "redirect_uri": settings.YAHOO_REDIRECT_URI,
     }
     r = requests.post(
@@ -113,5 +116,6 @@ def refresh_token(db: Session, user_id: str, tok: OAuthToken) -> OAuthToken:
     )
     if r.status_code != 200:
         raise RuntimeError(f"Yahoo refresh failed: {r.status_code} {r.text}")
+
     new_token = r.json()
-    return _persist_token(db, user_id, new_token)
+    return _persist_token(db, user_id, new_token)  # will encrypt new tokens
