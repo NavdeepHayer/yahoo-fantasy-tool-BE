@@ -1,8 +1,9 @@
 # app/api/routes_auth.py
 import json, secrets
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
+from app.core.crypto import encrypt_value
 from app.db.session import get_db
 from app.db.models import OAuthToken
 from app.core.config import settings
@@ -13,22 +14,47 @@ from app.services.yahoo_profile import upsert_user_from_yahoo
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.get("/login")
-def auth_login(debug: bool = Query(False)):
+def auth_login(debug: bool = False):
     if not settings.YAHOO_CLIENT_ID or not settings.YAHOO_REDIRECT_URI:
         raise HTTPException(500, "Yahoo env vars missing")
 
     state = secrets.token_urlsafe(24)
     url = get_authorization_url(state=state)
 
+    # For debugging, return the URL and state instead of redirecting
     if debug:
-        return JSONResponse({"redirect_uri": settings.YAHOO_REDIRECT_URI, "authorize_url": url})
-    return RedirectResponse(url)
+        return JSONResponse({"redirect_uri": settings.YAHOO_REDIRECT_URI, "authorize_url": url, "state": state})
+
+    # Create the redirect response and set the cookie on it
+    response = RedirectResponse(url)
+    response.set_cookie(
+        key="oauth_state",
+        value=state,
+        httponly=True,
+        secure=True,  # set to True if you are using HTTPS
+        max_age=600,
+        samesite="lax"
+    )
+    return response
+
 
 @router.get("/callback")
-def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
+def auth_callback(
+    request: Request,
+    response: Response,
+    code: str,
+    state: str,
+    db: Session = Depends(get_db)
+):
+    # Retrieve state from cookie
+    cookie_state = request.cookies.get("oauth_state")
+    if not cookie_state or cookie_state != state:
+        raise HTTPException(400, "Invalid or missing OAuth state")
+
+    # Optional: clear the cookie immediately
+    response.delete_cookie(key="oauth_state")
 
     redirect = settings.YAHOO_REDIRECT_URI.strip()
-    # 1) Exchange code for tokens (no helper; avoids signature clashes)
     oauth = OAuth2Session(
         client_id=settings.YAHOO_CLIENT_ID,
         redirect_uri=redirect,
@@ -42,22 +68,20 @@ def auth_callback(code: str, state: str, db: Session = Depends(get_db)):
         auth=(settings.YAHOO_CLIENT_ID, settings.YAHOO_CLIENT_SECRET),
     )
 
-    # 2) Upsert user using fresh access token (get GUID + nickname)
     profile = upsert_user_from_yahoo(db, access_token=token["access_token"])
     guid = profile["guid"]
 
-    # 3) Persist token with real GUID
     rec = OAuthToken(
         user_id=guid,
-        access_token=token.get("access_token", ""),
-        refresh_token=token.get("refresh_token"),
+        access_token=encrypt_value(token.get("access_token")),
+        refresh_token=encrypt_value(token.get("refresh_token")),
         expires_in=token.get("expires_in"),
         token_type=token.get("token_type"),
         scope=token.get("scope"),
-        raw=json.dumps(token),
+        raw=json.dumps(token),  # you may want to omit or encrypt raw as well
     )
     db.add(rec)
     db.commit()
 
-    # 4) Redirect post-login (adjust if you have a dashboard)
+    # Redirect back to root after successful login
     return RedirectResponse("/")

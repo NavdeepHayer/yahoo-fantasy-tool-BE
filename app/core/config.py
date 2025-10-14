@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     APP_ENV: str = "local"
     SECRET_KEY: str = "dev"   # default fallback
 
+    ENCRYPTION_KEY: str = "placeholder"
+
     CORS_ORIGINS: List[AnyHttpUrl] | List[str] = []
 
     DATABASE_URL: str = "sqlite:///./dev.db"
