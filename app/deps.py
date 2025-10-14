@@ -1,7 +1,13 @@
-from fastapi import Header, HTTPException
+from fastapi import Header, Query, HTTPException
 
-# Super simple "user" for dev: supply X-User-Id header in Postman
-async def get_user_id(x_user_id: str | None = Header(default="local-dev")) -> str:
-    if not x_user_id:
-        raise HTTPException(status_code=400, detail="Missing X-User-Id header")
-    return x_user_id
+def get_user_id(
+    user_id: str | None = Query(None, description="Yahoo GUID"),
+    x_user_id: str | None = Header(None, convert_underscores=False),  # exact header name
+) -> str:
+    uid = (user_id or x_user_id or "").strip()
+    if not uid:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id is required (use ?user_id=<GUID> or header X-User-Id: <GUID>)."
+        )
+    return uid

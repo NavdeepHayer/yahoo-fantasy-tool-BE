@@ -1,7 +1,6 @@
 from typing import Any, List, Tuple, Optional
 from sqlalchemy.orm import Session
-
-
+from app.db.models import User
 from app.core.config import settings
 
 # Public OAuth functions (re-exported for compatibility)
@@ -894,3 +893,34 @@ def _find_my_team_key_from_scoreboard_payload(scoreboard_payload: dict, my_guid:
                 return (t.get("team_key"), nm if isinstance(nm, str) else None)
     return (None, None)
 
+def get_current_user_profile(db: Session) -> dict:
+    """
+    Fetch the logged-in Yahoo user's profile via Yahoo Fantasy API.
+    Returns: {"guid": str, "nickname": str|None, "image_url": str|None}
+    """
+    # The 'users;use_login=1' endpoint returns the current account
+    raw = yahoo_raw_get("users;use_login=1")
+    # Defensive parse across Yahoo's odd shapes
+    # Expect something like: {"fantasy_content":{"users":{"0":{"user":[{...}]}}}}
+    fc = raw.get("fantasy_content", {})
+    users = fc.get("users", {})
+    user0 = (users.get("0", {}) or {}).get("user", [{}])[0] if isinstance(users, dict) else {}
+    guid = user0.get("guid")
+    prof = user0.get("profile", {}) if isinstance(user0, dict) else {}
+    nickname = prof.get("nickname")
+    image_url = prof.get("image_url") or prof.get("image_url_small")
+
+    if not guid:
+        raise RuntimeError("Could not parse Yahoo user GUID from /users;use_login=1")
+
+    # Upsert into our users table
+    existing = db.get(User, guid)
+    if existing:
+        existing.nickname = nickname or existing.nickname
+        existing.image_url = image_url or existing.image_url
+        db.add(existing)
+    else:
+        db.add(User(guid=guid, nickname=nickname, image_url=image_url))
+    db.commit()
+
+    return {"guid": guid, "nickname": nickname, "image_url": image_url}

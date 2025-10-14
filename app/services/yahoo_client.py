@@ -1,8 +1,10 @@
+from fastapi import HTTPException
 import requests
 from typing import Optional, Dict
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.models import OAuthToken
 from app.services.yahoo_oauth import get_latest_token, refresh_token
 
 
@@ -19,6 +21,15 @@ def yahoo_get(
     """
     Core Yahoo GET with auto-refresh on 401. Mirrors original behavior.
     """
+    uid = (user_id or "").strip()
+    tok = get_latest_token(db, uid)
+    if not tok:
+        # TEMP debug to confirm what the server sees
+        count = db.query(OAuthToken).filter(OAuthToken.user_id == uid).count()
+        raise HTTPException(
+            status_code=400,
+            detail=f"No Yahoo OAuth token on file for user_id={uid!r} (rows={count}). Call /auth/login and complete the flow first."
+        )
     tok = get_latest_token(db, user_id)
     if not tok:
         raise RuntimeError("No Yahoo OAuth token on file. Call /auth/login and complete the flow first.")

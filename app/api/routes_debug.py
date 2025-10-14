@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from urllib.parse import urlparse, parse_qs, quote_plus
 from typing import List, Tuple, Optional, Any
@@ -10,6 +11,11 @@ from app.core.security import gen_state
 from app.services.yahoo import yahoo_raw_get
 # import the parser directly to test exactly what /me/leagues uses
 from app.services.yahoo import _parse_leagues as __parse_leagues  # type: ignore
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from app.db.session import get_db
+from app.db.models import User, OAuthToken
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -262,3 +268,46 @@ def debug_me_leagues(
         return {"ok": True, "keys": keys, "count": len(parsed), "parsed": parsed}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    
+@router.get("/users")
+def list_users(db: Session = Depends(get_db)):
+    rows = db.query(User).order_by(User.created_at.desc()).all()
+    return [{"guid": r.guid, "nickname": r.nickname, "created_at": r.created_at} for r in rows]
+
+@router.get("/tokens")
+def tokens_for_user(user_id: str, db: Session = Depends(get_db)):
+    rows = (
+        db.query(OAuthToken)
+        .filter(OAuthToken.user_id == user_id)
+        .order_by(OAuthToken.id.desc())
+        .all()
+    )
+    return {
+        "user_id": user_id,
+        "count": len(rows),
+        "latest_created_at": rows[0].created_at if rows else None,
+    }
+
+
+
+@router.get("/db")
+def db_info(db: Session = Depends(get_db)):
+    # Dialect & DSN (sanitized)
+    url = settings.DATABASE_URL
+    sanitized = url.replace(settings.YAHOO_CLIENT_SECRET or "", "***") if url else url
+    dialect = db.bind.dialect.name if db.bind else "unknown"
+
+    server_ver = None
+    current_schema = None
+    try:
+        server_ver = db.execute(text("select version()")).scalar()
+        current_schema = db.execute(text("select current_schema()")).scalar()
+    except Exception as _:
+        pass
+
+    return {
+        "dialect": dialect,
+        "database_url": sanitized,
+        "server_version": server_ver,
+        "current_schema": current_schema,
+    }

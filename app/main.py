@@ -9,7 +9,6 @@ from app.api.routes_me import router as me_router
 from app.api.routes_league import router as league_router
 from app.api.routes_debug import router as debug_router
 
-
 app = FastAPI(title=settings.APP_NAME)
 
 # Create tables on startup (SQLite dev convenience)
@@ -32,6 +31,10 @@ def root():
 @app.get("/health")
 def health():
     return {"ok": True, "env": settings.APP_ENV}
+
+@app.on_event("startup")
+def startup_event():
+    Base.metadata.create_all(bind=engine)
 
 # Routers
 app.include_router(auth_router)

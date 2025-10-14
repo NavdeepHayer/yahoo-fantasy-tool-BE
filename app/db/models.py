@@ -19,3 +19,12 @@ class OAuthToken(Base):
 
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+class User(Base):
+    __tablename__ = "users"
+    # Yahoo GUID as the stable primary key
+    guid: Mapped[str] = mapped_column(String(64), primary_key=True)
+    nickname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
