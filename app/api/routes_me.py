@@ -5,8 +5,7 @@ from typing import List
 from app.db.session import get_db
 from app.schemas.league import League
 from app.services.yahoo import get_leagues, get_teams_for_user, yahoo_raw_get
-from app.deps import get_user_id
-from app.services.yahoo_matchups import get_my_weekly_matchups
+from app.services.yahoo.matchups import get_my_weekly_matchups
 from app.deps import get_current_user
 
 router = APIRouter(prefix="/me", tags=["me"])
@@ -71,15 +70,17 @@ def coerce_bool(val) -> bool:
 @router.get("/matchups")
 def my_matchups(
     week: int | None = Query(default=None, description="Week number (integer)"),
-    league_id: str | None = Query(default=None, description="Yahoo league key, e.g. 466.l.34067"),
+    league_id: str | None = Query(default=None, description="Yahoo league key, e.g. 466.l.34067 (team keys ok)"),
     include_categories: str | bool = Query(default="false", description="Include category stats"),
     include_points: str | bool = Query(default="true", description="Include points"),
     limit: int | None = Query(default=None, description="Limit number of matchups returned"),
+    debug: bool = Query(default=False, description="Return diagnostic trace"),
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
 ):
     """
-    Fetch weekly matchups. You can include category stats, points, and limit the number of returned entries.
+    Fetch weekly matchups for *your* team. Accepts league key or team key.
+    When `debug=true`, returns a `debug` array showing each discovery/parse stage.
     """
     try:
         return get_my_weekly_matchups(
@@ -90,6 +91,7 @@ def my_matchups(
             include_categories=coerce_bool(include_categories),
             include_points=coerce_bool(include_points),
             limit=limit,
+            debug=debug,  # ← important
         )
     except HTTPException as he:
         raise he
@@ -97,7 +99,6 @@ def my_matchups(
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch matchups")
-    
 
 @router.get("/whoami")
 def whoami(guid: str = Depends(get_current_user)):

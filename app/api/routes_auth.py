@@ -15,7 +15,7 @@ from app.core.crypto import encrypt_value
 from app.core.auth import create_session_token
 from app.db.session import get_db
 from app.db.models import OAuthToken
-from app.services.yahoo_profile import upsert_user_from_yahoo
+from app.services.yahoo import upsert_user_from_yahoo
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

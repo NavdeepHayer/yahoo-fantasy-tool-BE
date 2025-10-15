@@ -3,8 +3,8 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.services.yahoo_client import yahoo_get
-from app.services.yahoo_parsers import parse_roster
+from app.services.yahoo.client import yahoo_get
+from app.services.yahoo.parsers import parse_roster
 
 def get_roster_for_user(db: Session, user_id: str, team_id: str, date: Optional[str] = None) -> dict:
     if settings.YAHOO_FAKE_MODE:

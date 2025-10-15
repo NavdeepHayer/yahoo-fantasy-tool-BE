@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.crypto import decrypt_value
 from app.db.models import OAuthToken
-from app.services.yahoo_oauth import get_latest_token, refresh_token
+from app.services.yahoo.oauth import get_latest_token, refresh_token
 
 
 def _auth_headers(access_token: str) -> Dict[str, str]:
@@ -49,3 +49,11 @@ def yahoo_get(
 
     resp.raise_for_status()
     return resp.json()
+
+def yahoo_raw_get(db: Session, user_id: str, path: str, params: dict | None = None):
+    """
+    Raw GET passthrough to Yahoo Fantasy API. Ensures format=json unless explicitly overridden.
+    """
+    q = dict(params or {})
+    q.setdefault("format", "json")
+    return yahoo_get(db, user_id, path, params=q)

@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import User  # not used here but kept for symmetry if needed later
 from app.core.config import settings
-from app.services.yahoo_client import yahoo_get
-from app.services.yahoo_parsers import parse_leagues
+from app.services.yahoo.client import yahoo_get
+from app.services.yahoo.parsers import parse_leagues
 
 def _get(d: Any, *keys) -> Any:
     cur = d

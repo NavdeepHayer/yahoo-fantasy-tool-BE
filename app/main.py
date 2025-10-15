@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api import routes_auth, routes_me, routes_league
 import json, re
+from app.api.routes_debug import router as debug_router
 
 app = FastAPI(title=settings.APP_NAME)
 
@@ -51,7 +52,11 @@ async def _cors_override(request: Request, call_next):
 app.include_router(routes_auth.router)
 app.include_router(routes_me.router)
 app.include_router(routes_league.router)
+app.include_router(debug_router)
+
 
 @app.get("/health")
 def health():
     return {"ok": True, "env": settings.APP_ENV}
+
+

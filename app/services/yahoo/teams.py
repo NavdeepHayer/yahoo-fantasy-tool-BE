@@ -3,7 +3,7 @@ from typing import Any, List, Tuple
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.services.yahoo_client import yahoo_get
+from app.services.yahoo.client import yahoo_get
 
 def get_teams_for_user(db: Session, user_id: str, league_id: str) -> List[dict]:
     if settings.YAHOO_FAKE_MODE:

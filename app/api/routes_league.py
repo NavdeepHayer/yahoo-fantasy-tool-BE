@@ -7,6 +7,15 @@ from app.schemas.team import Team, Roster
 from app.services.yahoo import get_teams_for_user, get_roster_for_user
 from app.deps import get_current_user
 
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.orm import Session
+
+from app.db.session import get_db
+from app.deps import get_user_id
+from app.services.yahoo import search_free_agents, get_scoreboard
+from app.schemas.free_agent import FreeAgent
+
 router = APIRouter(prefix="/league", tags=["league"])
 
 @router.get("/{league_id}/teams", response_model=List[Team])
@@ -52,3 +61,30 @@ def team_roster(
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch roster")
     return Roster(**data)
+
+@router.get("/{league_id}/free-agents", response_model=List[FreeAgent])
+def league_free_agents(
+    league_id: str,
+    position: Optional[str] = Query(default=None, description="e.g., G,F,C,PG,SG,SF,PF"),
+    query: Optional[str] = Query(default=None, description="name search"),
+    count: int = Query(default=25, ge=1, le=50),
+    start: int = Query(default=0, ge=0),
+    status: str = Query(default="FA", description="FA (free agent), W (waivers), T (all)"),
+    db: Session = Depends(get_db),
+    guid: str = Depends(get_current_user),
+):
+    return search_free_agents(
+        db, guid, league_id,
+        position=position, query=query, count=count, start=start, status=status
+    )
+
+
+@router.get("{league_id}/scoreboard")
+def league_scoreboard(
+    league_id: str,
+    week: Optional[int] = Query(default=None, description="If omitted, current week"),
+    enriched: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+) -> Dict[str, Any]:
+    return get_scoreboard(db, user_id, league_id, week=week, enriched=enriched)
