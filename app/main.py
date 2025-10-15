@@ -1,54 +1,51 @@
 # app/main.py
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api import routes_auth, routes_me, routes_league
-
-import json
+import json, re
 
 app = FastAPI(title=settings.APP_NAME)
 
-# --- Strict CORS setup ---
 def _parse_origins(value):
     if isinstance(value, list):
         return value
     if isinstance(value, str):
         v = value.strip()
         if v.startswith("["):
-            # value came from .env as a JSON-ish list
             try:
                 return json.loads(v)
             except Exception:
                 pass
-        # single origin string
         return [v] if v else []
     return []
 
+# Prefer explicit whitelist in local
 ALLOWED_ORIGINS = _parse_origins(getattr(settings, "CORS_ORIGINS", []))
+print("CORS allow_origins =", ALLOWED_ORIGINS)  # keep while debugging
 
-# Fail fast if empty in non-local envs
-# (optional; comment out if you want the API callable from any origin-less client like curl)
-# if settings.APP_ENV.lower() != "local" and not ALLOWED_ORIGINS:
-#     raise RuntimeError("CORS_ORIGINS must be set in non-local environments")
-
-# ✅ Validate configuration at boot
-@app.on_event("startup")
-def _validate_config():
-    settings.validate_at_startup()
-
+# 1) Starlette CORS — use regex to match localhost/127.0.0.1:5173 precisely
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,             # needed if your frontend ever sends cookies
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=[
-        "Authorization",
-        "Content-Type",
-        "X-Requested-With",
-        "X-User-Id",                    # if you keep using this in dev
-    ],
-    max_age=600,                        # cache preflight for 10 minutes
+    allow_origins=ALLOWED_ORIGINS,                 # fine for prod (mynbaassistant.com)
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):5173$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    max_age=600,
 )
+
+# 2) Safety net: override wildcard headers set by a proxy (e.g., ngrok)
+@app.middleware("http")
+async def _cors_override(request: Request, call_next):
+    resp = await call_next(request)
+    origin = request.headers.get("origin") or ""
+    if re.match(r"^https?://(localhost|127\.0\.0\.1):5173$", origin):
+        # If some upstream set '*', replace it with the exact origin so cookies are allowed
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers.setdefault("Vary", "Origin")
+    return resp
 
 # Routers
 app.include_router(routes_auth.router)
