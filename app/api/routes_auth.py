@@ -46,12 +46,24 @@ def _default_frontend_url() -> str:
             return val.rstrip("/")
     return "http://localhost:5173"
 
-def _normalize_return_to(_: str | None) -> str:
+def _normalize_return_to(request: Request, rt: str | None) -> str:
     """
-    Force a stable, canonical landing page after OAuth.
-    (Avoids www/apex mismatches and broken deep links.)
+    In production: always land on https://mynbaassistant.com/leagues
+    In dev/local/ngrok: honor the provided return_to (or default FE URL).
     """
-    return f"https://{CANONICAL_FE_HOST}/leagues"
+    api_host = (request.url.hostname or "").lower()
+    is_prod = api_host == "api.mynbaassistant.com"
+
+    if is_prod:
+        return f"https://{CANONICAL_FE_HOST}/leagues"
+
+    # dev/local: use FE-provided rt or the configured FE URL
+    base = (rt or f"{_default_frontend_url()}/leagues").strip()
+    # safety: allow only http(s)
+    if base.startswith("http://") or base.startswith("https://"):
+        return base
+    # if someone passed a path only, join to the default FE
+    return f"{_default_frontend_url().rstrip('/')}/{base.lstrip('/')}"
 
 def _cookie_params_for(request: Request, return_to: str | None):
     """
@@ -94,8 +106,8 @@ def auth_login(
         raise HTTPException(500, "YAHOO_REDIRECT_URI missing")
 
     # 2) Normalize the destination we want to land on after OAuth
-    #    (We ignore FE-provided return_to to avoid www/apex issues.)
-    return_to = _normalize_return_to(return_to or f"{_default_frontend_url()}/leagues")
+    #    (env-aware: prod → canonical; dev/local → honor FE)
+    return_to = _normalize_return_to(request, return_to)
 
     # 3) Build state: csrf + encoded payload (return_to + redirect_uri)
     csrf = secrets.token_urlsafe(24)
@@ -154,7 +166,8 @@ def auth_callback(
     if not isinstance(payload, dict):
         raise HTTPException(400, "Malformed OAuth state")
 
-    return_to = payload.get("r") or f"https://{CANONICAL_FE_HOST}/leagues"
+    # env-aware normalization here too
+    return_to = _normalize_return_to(request, payload.get("r"))
     redirect_uri = payload.get("u")
     if not isinstance(redirect_uri, str) or not redirect_uri:
         raise HTTPException(400, "Missing redirect_uri in state")
