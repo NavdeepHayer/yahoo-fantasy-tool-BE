@@ -163,14 +163,9 @@ def auth_callback(
 
     # 5) Set cross-site session cookie and redirect back to FE
     session_token = create_session_token(guid)
-    cookie_params = _cookie_params_for(request)
-
+    cookie_params = _cookie_params_for(request, return_to)
     resp = RedirectResponse(return_to, status_code=302)
-    resp.set_cookie(
-        key="session_token",
-        value=session_token,
-        **cookie_params,
-    )
+    resp.set_cookie("session_token", session_token, **cookie_params)
     # clear CSRF state cookie
     resp.delete_cookie("oauth_state", path="/")
     return resp
@@ -182,15 +177,28 @@ def _b64url_decode(s: str):
     except Exception:
         return None
 
-def _cookie_params_for(request: Request):
-    host = (request.url.hostname or "").lower()
-    is_prod = host.endswith(".mynbaassistant.com")
-    # For prod (api.mynbaassistant.com <-> mynbaassistant.com) we need cross-site cookie
+def _cookie_params_for(request: Request, return_to: str | None):
+    """
+    Set cookie params so the browser will send session_token on XHR.
+    - If cross-site (FE origin != API host): SameSite=None; Secure is required.
+    - In prod (api.mynbaassistant.com <-> mynbaassistant.com): also set cookie domain.
+    """
+    api_host = (request.url.hostname or "").lower()
+    fe_host = urlparse(return_to).hostname.lower() if return_to else ""
+
+    is_cross_site = bool(fe_host and fe_host != api_host)
+
+    is_prod = api_host.endswith(".mynbaassistant.com")
+    cookie_domain = ".mynbaassistant.com" if is_prod else None
+
+    # Secure must be True for SameSite=None
+    must_secure = (request.url.scheme == "https") or is_prod
+
     return {
-        "domain": ".mynbaassistant.com" if is_prod else None,
-        "secure": True if request.url.scheme == "https" or is_prod else False,
+        "domain": cookie_domain,
+        "secure": True if (is_cross_site or must_secure) else False,
         "httponly": True,
-        "samesite": "none" if is_prod else "lax",
+        "samesite": "none" if is_cross_site or is_prod else "lax",
         "path": "/",
         "max_age": 7 * 24 * 3600,
     }

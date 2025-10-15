@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = None
 
     FRONTEND_URL_LOCAL: str = "http://localhost:5173"
-    FRONTEND_URL_REMOTE: str = "https://fantasy.navdeephayer.com"
+    FRONTEND_URL_REMOTE: str = "https://mynbaassistant.com"
     API_URL_LOCAL: str = "http://127.0.0.1:8001"
     API_URL_REMOTE: str = "https://api.mynbaassistant.com"
 
