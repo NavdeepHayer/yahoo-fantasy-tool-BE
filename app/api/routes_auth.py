@@ -106,7 +106,6 @@ def auth_login(
 @router.get("/callback")
 def auth_callback(
     request: Request,
-    response: Response,
     code: str,
     state: str,
     db: Session = Depends(get_db),
@@ -122,12 +121,12 @@ def auth_callback(
     if not isinstance(payload, dict):
         raise HTTPException(400, "Malformed OAuth state")
 
-    return_to = payload.get("r")
-    redirect_uri = payload.get("u")  # <-- EXACT redirect_uri used earlier
+    return_to = payload.get("r") or "https://mynbaassistant.com/leagues"
+    redirect_uri = payload.get("u")
     if not isinstance(redirect_uri, str):
         raise HTTPException(400, "Missing redirect_uri in state")
 
-    # 3) Exchange code using THE SAME redirect_uri
+    # 3) Exchange code using the SAME redirect_uri
     oauth = OAuth2Session(
         client_id=settings.YAHOO_CLIENT_ID,
         redirect_uri=redirect_uri,
@@ -142,10 +141,8 @@ def auth_callback(
             auth=(settings.YAHOO_CLIENT_ID, settings.YAHOO_CLIENT_SECRET),
         )
     except InvalidGrantError:
-        # Code expired/reused — restart login
-        return RedirectResponse(url="/auth/login")
+        return RedirectResponse(url="/auth/login", status_code=302)
     except Exception as e:
-        # Helpful surface — shows when redirect_uri mismatch happens
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
 
     # 4) Persist token + user
@@ -164,18 +161,36 @@ def auth_callback(
     db.add(rec)
     db.commit()
 
-    # 5) Session cookie for FE
+    # 5) Set cross-site session cookie and redirect back to FE
     session_token = create_session_token(guid)
-    policy = _cookie_policy_for_session(request, return_to)
+    cookie_params = _cookie_params_for(request)
 
-    resp = RedirectResponse(return_to or "/")
+    resp = RedirectResponse(return_to, status_code=302)
     resp.set_cookie(
         key="session_token",
         value=session_token,
-        httponly=True,
-        secure=policy["secure"],
-        samesite=policy["samesite"],   # "none" for ngrok https cross-site
-        max_age=7 * 24 * 3600,
+        **cookie_params,
     )
-    resp.delete_cookie("oauth_state")
+    # clear CSRF state cookie
+    resp.delete_cookie("oauth_state", path="/")
     return resp
+
+def _b64url_decode(s: str):
+    try:
+        pad = '=' * (-len(s) % 4)
+        return json.loads(base64.urlsafe_b64decode(s + pad).decode("utf-8"))
+    except Exception:
+        return None
+
+def _cookie_params_for(request: Request):
+    host = (request.url.hostname or "").lower()
+    is_prod = host.endswith(".mynbaassistant.com")
+    # For prod (api.mynbaassistant.com <-> mynbaassistant.com) we need cross-site cookie
+    return {
+        "domain": ".mynbaassistant.com" if is_prod else None,
+        "secure": True if request.url.scheme == "https" or is_prod else False,
+        "httponly": True,
+        "samesite": "none" if is_prod else "lax",
+        "path": "/",
+        "max_age": 7 * 24 * 3600,
+    }
