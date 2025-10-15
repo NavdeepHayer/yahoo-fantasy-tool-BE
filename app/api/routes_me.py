@@ -97,3 +97,8 @@ def my_matchups(
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch matchups")
+    
+
+@router.get("/whoami")
+def whoami(guid: str = Depends(get_current_user)):
+    return {"guid": guid}

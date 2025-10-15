@@ -30,6 +30,19 @@ class Settings(BaseSettings):
     # DB
     DATABASE_URL: Optional[str] = None
 
+    FRONTEND_URL_LOCAL: str = "http://localhost:5173"
+    FRONTEND_URL_REMOTE: str = "https://fantasy.navdeephayer.com"
+    API_URL_LOCAL: str = "http://127.0.0.1:8001"
+    API_URL_REMOTE: str = "https://api.mynbaassistant.com"
+
+    @property
+    def frontend_url(self) -> str:
+        return self.FRONTEND_URL_REMOTE if self.APP_ENV != "local" else self.FRONTEND_URL_LOCAL
+
+    @property
+    def api_url(self) -> str:
+        return self.API_URL_REMOTE if self.APP_ENV != "local" else self.API_URL_LOCAL
+
     # Yahoo OAuth
     YAHOO_CLIENT_ID: Optional[str] = None
     YAHOO_CLIENT_SECRET: Optional[str] = None

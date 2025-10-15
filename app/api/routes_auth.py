@@ -2,6 +2,7 @@
 import base64
 import json
 import secrets
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -11,7 +12,6 @@ from app.core.crypto import encrypt_value
 from app.db.session import get_db
 from app.db.models import OAuthToken
 from app.core.config import settings
-from app.services.yahoo import get_authorization_url
 from requests_oauthlib import OAuth2Session
 from oauthlib.oauth2.rfc6749.errors import InvalidGrantError
 from app.services.yahoo_profile import upsert_user_from_yahoo
@@ -20,55 +20,83 @@ from app.core.auth import create_session_token
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _encode_state_payload(return_to: str | None) -> str:
-    """csrf.<base64url-json> where json={'r': return_to}."""
-    csrf = secrets.token_urlsafe(24)
-    payload = {"r": return_to} if return_to else {}
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii").rstrip("=")
-    return f"{csrf}.{encoded}"
+# ---------- helpers ----------
 
+def _b64url(data: dict) -> str:
+    raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
-def _decode_return_to_from_state(state_value: str | None) -> str | None:
-    if not state_value or "." not in state_value:
-        return None
+def _b64url_decode(s: str) -> dict | None:
     try:
-        encoded = state_value.split(".", 1)[1]
-        # pad for base64
-        encoded += "=" * ((4 - len(encoded) % 4) % 4)
-        raw = base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8")
-        data = json.loads(raw)
-        r = data.get("r")
-        if isinstance(r, str) and r.startswith(("http://", "https://")):
-            return r
+        s += "=" * ((4 - len(s) % 4) % 4)
+        return json.loads(base64.urlsafe_b64decode(s.encode("ascii")).decode("utf-8"))
     except Exception:
         return None
-    return None
 
+def _default_frontend_url() -> str:
+    for key in ("FRONTEND_URL_REMOTE", "FRONTEND_URL_LOCAL"):
+        val = getattr(settings, key, None)
+        if isinstance(val, str) and val:
+            return val.rstrip("/")
+    return "http://localhost:5173"
+
+def _cookie_policy_for_session(request: Request, return_to: str | None):
+    is_https = (request.url.scheme == "https")
+    api_host = request.url.netloc
+    fe_host = urlparse(return_to).netloc if return_to else ""
+    cross_site = bool(fe_host and fe_host != api_host)
+    if is_https and cross_site:
+        return {"secure": True, "samesite": "none"}  # string "none"
+    return {"secure": is_https, "samesite": "lax"}
+
+
+# ---------- routes ----------
 
 @router.get("/login")
-def auth_login(debug: bool = False, return_to: str | None = Query(default=None)):
-    """
-    Start Yahoo OAuth. Optional ?return_to=<frontend_url> tells callback where to go after login.
-    """
-    if not settings.YAHOO_CLIENT_ID or not settings.YAHOO_REDIRECT_URI:
-        raise HTTPException(500, "Yahoo env vars missing")
+def auth_login(
+    request: Request,
+    debug: bool = False,
+    return_to: str | None = Query(default=None),
+):
+    # pick the redirect_uri we will actually use NOW
+    redirect_uri = settings.YAHOO_REDIRECT_URI.strip()
+    if not redirect_uri:
+        raise HTTPException(500, "YAHOO_REDIRECT_URI missing")
 
-    state = _encode_state_payload(return_to)
-    url = get_authorization_url(state=state)
+    if not return_to:
+        return_to = f"{_default_frontend_url()}/leagues"
+
+    # state = csrf + encoded payload with BOTH return_to and redirect_uri
+    csrf = secrets.token_urlsafe(24)
+    payload = {"r": return_to, "u": redirect_uri}
+    state = f"{csrf}.{_b64url(payload)}"
+
+    # Build auth URL HERE using the same redirect_uri
+    oauth = OAuth2Session(
+        client_id=settings.YAHOO_CLIENT_ID,
+        redirect_uri=redirect_uri,
+        scope=["fspt-r"],
+    )
+    authorize_url, _ = oauth.authorization_url(
+        settings.YAHOO_AUTH_URL,
+        state=state,
+    )
 
     if debug:
-        return JSONResponse(
-            {"redirect_uri": settings.YAHOO_REDIRECT_URI, "authorize_url": url, "state": state}
-        )
+        return JSONResponse({
+            "using_redirect_uri": redirect_uri,
+            "authorize_url": authorize_url,
+            "state": state,
+            "env": getattr(settings, "APP_ENV", "unknown"),
+        })
 
-    resp = RedirectResponse(url)
+    # CSRF cookie
+    resp = RedirectResponse(authorize_url)
     resp.set_cookie(
         key="oauth_state",
         value=state,
         httponly=True,
-        secure=settings.COOKIE_SECURE,  # True in HTTPS
+        secure=(request.url.scheme == "https"),
         max_age=600,
         samesite="lax",
     )
@@ -83,19 +111,28 @@ def auth_callback(
     state: str,
     db: Session = Depends(get_db),
 ):
-    # Validate state via cookie (CSRF protection)
+    # 1) CSRF check
     cookie_state = request.cookies.get("oauth_state")
     if not cookie_state or cookie_state != state:
         raise HTTPException(400, "Invalid or missing OAuth state")
 
-    # Build OAuth session and exchange code
-    redirect_uri = settings.YAHOO_REDIRECT_URI.strip()
+    # 2) Decode payload we sent at /auth/login
+    parts = state.split(".", 1)
+    payload = _b64url_decode(parts[1]) if len(parts) == 2 else None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Malformed OAuth state")
+
+    return_to = payload.get("r")
+    redirect_uri = payload.get("u")  # <-- EXACT redirect_uri used earlier
+    if not isinstance(redirect_uri, str):
+        raise HTTPException(400, "Missing redirect_uri in state")
+
+    # 3) Exchange code using THE SAME redirect_uri
     oauth = OAuth2Session(
         client_id=settings.YAHOO_CLIENT_ID,
         redirect_uri=redirect_uri,
         scope=["fspt-r"],
     )
-
     try:
         token = oauth.fetch_token(
             token_url=settings.YAHOO_TOKEN_URL,
@@ -105,10 +142,13 @@ def auth_callback(
             auth=(settings.YAHOO_CLIENT_ID, settings.YAHOO_CLIENT_SECRET),
         )
     except InvalidGrantError:
-        # Code expired or reused — restart fresh login (keeps UX simple)
+        # Code expired/reused — restart login
         return RedirectResponse(url="/auth/login")
+    except Exception as e:
+        # Helpful surface — shows when redirect_uri mismatch happens
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {e}")
 
-    # Upsert user and persist token
+    # 4) Persist token + user
     profile = upsert_user_from_yahoo(db, access_token=token["access_token"])
     guid = profile["guid"]
 
@@ -119,36 +159,23 @@ def auth_callback(
         expires_in=token.get("expires_in"),
         token_type=token.get("token_type"),
         scope=token.get("scope"),
-        raw=json.dumps(token),  # consider encrypting or omitting in prod
+        raw=json.dumps(token),
     )
     db.add(rec)
     db.commit()
 
-    # Create session cookie
+    # 5) Session cookie for FE
     session_token = create_session_token(guid)
+    policy = _cookie_policy_for_session(request, return_to)
 
-    # Determine where to send the user next from the state payload
-    return_to = _decode_return_to_from_state(cookie_state) or "/"
-
-    resp = RedirectResponse(return_to)
+    resp = RedirectResponse(return_to or "/")
     resp.set_cookie(
         key="session_token",
         value=session_token,
         httponly=True,
-        secure=settings.APP_ENV != "local",  # True in non-local
+        secure=policy["secure"],
+        samesite=policy["samesite"],   # "none" for ngrok https cross-site
         max_age=7 * 24 * 3600,
-        samesite="lax",
     )
-    # Clear one-time state cookie
     resp.delete_cookie("oauth_state")
-    return resp
-
-
-@router.post("/logout")
-def auth_logout(response: Response):
-    """
-    Clears the session cookie. Returns 204 No Content.
-    """
-    resp = Response(status_code=204)
-    resp.delete_cookie("session_token")
     return resp
