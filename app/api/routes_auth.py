@@ -64,7 +64,7 @@ def auth_login(
         raise HTTPException(500, "YAHOO_REDIRECT_URI missing")
 
     if not return_to:
-        return_to = f"{_default_frontend_url()}/leagues"
+        return_to = f"{_default_frontend_url()}/"
 
     # state = csrf + encoded payload with BOTH return_to and redirect_uri
     csrf = secrets.token_urlsafe(24)
@@ -121,7 +121,7 @@ def auth_callback(
     if not isinstance(payload, dict):
         raise HTTPException(400, "Malformed OAuth state")
 
-    return_to = payload.get("r") or "https://mynbaassistant.com/leagues"
+    return_to = payload.get("r") or "https://mynbaassistant.com/"
     redirect_uri = payload.get("u")
     if not isinstance(redirect_uri, str):
         raise HTTPException(400, "Missing redirect_uri in state")
