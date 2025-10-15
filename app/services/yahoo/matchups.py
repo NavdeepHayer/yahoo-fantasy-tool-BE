@@ -831,3 +831,141 @@ def get_my_weekly_matchups(
     if debug:
         result["debug"] = diag
     return result
+
+def get_league_week_matchups_scores(
+    db: Session,
+    user_id: str,
+    *,
+    league_id: str,
+    week: int | None = None,
+    include_points: bool = True,
+    include_categories: bool = True,
+    compact: bool = True,   # if True: no per-stat breakdown
+    debug: bool = False,
+) -> dict:
+    """
+    Return ALL matchups for a league/week with just the score.
+    - points: totals for each team (if include_points)
+    - categories: W/L/T per matchup (if include_categories)
+    """
+    diag = [] if debug else None
+
+    # Normalize possible team key input to league key
+    def _normalize_league_id(lid: str | None) -> str | None:
+        if not lid:
+            return lid
+        if ".t." in lid:
+            return lid.split(".t.", 1)[0]
+        return lid
+
+    league_id = _normalize_league_id(league_id)
+
+    # League meta to resolve week and stat map (for categories)
+    meta = _get_league_settings_meta(db, user_id, league_id)
+    use_week = week or meta.get("current_week")
+    stat_map = _get_stat_id_map(db, user_id, league_id) if include_categories else {}
+
+    week_part = f";week={use_week}" if use_week else ""
+    sb_payload = yahoo_get(db, user_id, f"/league/{league_id}/scoreboard{week_part}")
+
+    # extract scoreboard node
+    fc = sb_payload.get("fantasy_content", {})
+    league = fc.get("league")
+    sb = None
+    if isinstance(league, list) and len(league) >= 2 and isinstance(league[1], dict):
+        sb = league[1].get("scoreboard")
+        league_fields = league[0] if isinstance(league[0], dict) else {}
+    elif isinstance(league, dict):
+        sb = league.get("scoreboard")
+        league_fields = league
+    else:
+        sb = {}
+        league_fields = {}
+    league_name = league_fields.get("name")
+    sport = league_fields.get("game_code")
+    season = league_fields.get("season")
+
+    matchups_out: List[dict] = []
+    if isinstance(sb, dict):
+        for matchup in _iter_scoreboard_matchups(sb):
+            m = _to_dict(matchup)
+            teams = _get_teams_from_matchup(m)
+            if not isinstance(teams, dict):
+                continue
+
+            t0 = _to_dict(teams.get("0", {}).get("team"))
+            t1 = _to_dict(teams.get("1", {}).get("team"))
+            if not t0 or not t1:
+                continue
+
+            k0, k1 = t0.get("team_key"), t1.get("team_key")
+            n0, n1 = _team_name(t0), _team_name(t1)
+
+            # points
+            points = None
+            if include_points:
+                p0 = _team_points_from_team_node(t0)
+                p1 = _team_points_from_team_node(t1)
+                points = {"team1": p0, "team2": p1}
+
+            # categories (W/L/T)
+            categories = None
+            category_breakdown = None
+            if include_categories:
+                stats0 = _stats_map_from_team_node(t0)
+                stats1 = _stats_map_from_team_node(t1)
+
+                wins1 = losses1 = ties = 0
+                rows = []
+                for w in _iter_stat_winners(m, sb):
+                    sid = w.get("stat_id")
+                    if not sid:
+                        continue
+                    name = stat_map.get(sid, sid)
+
+                    if w.get("is_tied"):
+                        ties += 1
+                        leader = 0
+                    else:
+                        winner_key = w.get("winner_team_key")
+                        leader = 1 if winner_key == k0 else 2
+                        if leader == 1:
+                            wins1 += 1
+                        else:
+                            losses1 += 1
+
+                    if not compact:
+                        rows.append({
+                            "name": name,
+                            "team1": stats0.get(sid),
+                            "team2": stats1.get(sid),
+                            "leader": leader,  # 0 tie, 1 team1, 2 team2
+                        })
+
+                categories = {"team1_wins": wins1, "team2_wins": losses1, "ties": ties}
+                if not compact:
+                    category_breakdown = rows
+
+            matchups_out.append({
+                "team1_key": k0,
+                "team1_name": n0,
+                "team2_key": k1,
+                "team2_name": n1,
+                "status": m.get("status") or sb.get("status"),
+                "is_playoffs": bool(int(m.get("is_playoffs", sb.get("is_playoffs", "0")))),
+                "points": points,
+                "categories": categories,
+                **({ "category_breakdown": category_breakdown } if (include_categories and not compact) else {}),
+            })
+
+    result = {
+        "league_id": league_id,
+        "league_name": league_name,
+        "season": season,
+        "sport": sport,
+        "week": str(use_week) if use_week is not None else None,
+        "matchups": matchups_out,
+    }
+    if debug:
+        result["debug"] = diag
+    return result

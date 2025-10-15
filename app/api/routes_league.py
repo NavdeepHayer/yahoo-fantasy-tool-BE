@@ -15,6 +15,7 @@ from app.db.session import get_db
 from app.deps import get_user_id
 from app.services.yahoo import search_free_agents, get_scoreboard
 from app.schemas.free_agent import FreeAgent
+from app.services.yahoo.matchups import get_league_week_matchups_scores
 
 router = APIRouter(prefix="/league", tags=["league"])
 
@@ -88,3 +89,33 @@ def league_scoreboard(
     user_id: str = Depends(get_user_id),
 ) -> Dict[str, Any]:
     return get_scoreboard(db, user_id, league_id, week=week, enriched=enriched)
+
+
+@router.get("/{league_id}/matchups/scores")
+def league_matchups_scores(
+    league_id: str,
+    week: int | None = Query(default=None, description="Week number (integer)"),
+    include_points: bool = Query(default=True),
+    include_categories: bool = Query(default=True),
+    compact: bool = Query(default=True, description="If false, include per-stat breakdown"),
+    debug: bool = Query(default=False),
+    db: Session = Depends(get_db),
+    guid: str = Depends(get_current_user),
+):
+    try:
+        return get_league_week_matchups_scores(
+            db,
+            guid,
+            league_id=league_id,
+            week=week,
+            include_points=include_points,
+            include_categories=include_categories,
+            compact=compact,
+            debug=debug,
+        )
+    except HTTPException as he:
+        raise he
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to fetch league matchups scores")
