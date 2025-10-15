@@ -15,26 +15,32 @@ from app.core.auth import create_session_token
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.get("/login")
-def auth_login(debug: bool = False):
+def auth_login(debug: bool = False, return_to: str | None = Query(default=None)):
+    """
+    Start Yahoo OAuth. Optional ?return_to=<frontend_url> tells callback where to go after login.
+    """
     if not settings.YAHOO_CLIENT_ID or not settings.YAHOO_REDIRECT_URI:
         raise HTTPException(500, "Yahoo env vars missing")
 
-    state = secrets.token_urlsafe(24)
+    import base64, json
+    # store return_to inside state so we can decode later
+    state_payload = {"r": return_to} if return_to else {}
+    state_raw = json.dumps(state_payload).encode()
+    state = secrets.token_urlsafe(8) + "." + base64.urlsafe_b64encode(state_raw).decode()
+
     url = get_authorization_url(state=state)
 
-    # For debugging, return the URL and state instead of redirecting
     if debug:
-        return JSONResponse({"redirect_uri": settings.YAHOO_REDIRECT_URI, "authorize_url": url, "state": state})
+        return JSONResponse({"authorize_url": url, "state": state})
 
-    # Create the redirect response and set the cookie on it
     response = RedirectResponse(url)
     response.set_cookie(
         key="oauth_state",
         value=state,
         httponly=True,
-        secure=settings.COOKIE_SECURE,  # set to True if you are using HTTPS
+        secure=settings.COOKIE_SECURE,
         max_age=600,
-        samesite="lax"
+        samesite="lax",
     )
     return response
 
@@ -85,9 +91,27 @@ def auth_callback(
     db.commit()
     
     # 🎫 Create a new session token for this user
+      # 🎫 Create a new session token for this user
     session_token = create_session_token(guid)
-    response = RedirectResponse("/")  # redirect back to your frontend root
-    # secure=True only when running behind HTTPS (e.g. ngrok or production)
+
+    # Decode return_to from state (if present)
+    import base64, json
+    return_to = None
+    try:
+        if "." in state:
+            encoded = state.split(".", 1)[1]
+            padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+            raw = base64.urlsafe_b64decode(padded.encode()).decode()
+            payload = json.loads(raw)
+            return_to = payload.get("r")
+    except Exception:
+        pass
+
+    # fallback if nothing valid
+    if not return_to or not return_to.startswith(("http://", "https://")):
+        return_to = "/"  # default: API root
+
+    response = RedirectResponse(return_to)
     response.set_cookie(
         key="session_token",
         value=session_token,
