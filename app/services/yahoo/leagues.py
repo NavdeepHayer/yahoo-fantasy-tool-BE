@@ -1,11 +1,12 @@
 from __future__ import annotations
-from typing import Any, List, Tuple, Optional
+from typing import Any, List, Tuple, Optional, Dict
 from sqlalchemy.orm import Session
 
 from app.db.models import User  # not used here but kept for symmetry if needed later
 from app.core.config import settings
 from app.services.yahoo.client import yahoo_get
 from app.services.yahoo.parsers import parse_leagues
+
 
 def _get(d: Any, *keys) -> Any:
     cur = d
@@ -16,12 +17,14 @@ def _get(d: Any, *keys) -> Any:
             return None
     return cur
 
+
 def _as_list(x: Any) -> List:
     if x is None:
         return []
     if isinstance(x, list):
         return x
     return [x]
+
 
 def _fetch_league_settings(db: Session, user_id: str, league_keys: List[str]) -> dict[str, List[str]]:
     if not league_keys:
@@ -68,6 +71,61 @@ def _fetch_league_settings(db: Session, user_id: str, league_keys: List[str]) ->
 
     return out
 
+
+# NEW: lightweight fetch of current_week per league (no settings call)
+def _fetch_league_current_week(
+    db: Session,
+    user_id: str,
+    league_keys: List[str],
+) -> Dict[str, Optional[int]]:
+    """
+    Returns mapping { league_key: current_week } for the provided league_keys.
+    Uses /leagues;league_keys=... (without /settings) which includes meta like current_week.
+    """
+    result: Dict[str, Optional[int]] = {}
+    if not league_keys:
+        return result
+
+    keys_param = ",".join(league_keys)
+    payload = yahoo_get(db, user_id, f"/leagues;league_keys={keys_param}")
+    fc = payload.get("fantasy_content", {})
+    leagues_node = fc.get("leagues")
+
+    if not isinstance(leagues_node, dict):
+        return result
+
+    for idx, node in leagues_node.items():
+        if not str(idx).isdigit() or not isinstance(node, dict):
+            continue
+
+        league_list = node.get("league")
+        meta = None
+        if isinstance(league_list, list) and league_list:
+            # first element typically has meta fields (league_key, name, current_week, etc.)
+            first = league_list[0]
+            if isinstance(first, dict):
+                meta = first
+        elif isinstance(league_list, dict):
+            meta = league_list
+
+        if not isinstance(meta, dict):
+            continue
+
+        league_key = meta.get("league_key") or meta.get("league_id")
+        if not league_key:
+            continue
+
+        cw = meta.get("current_week")
+        try:
+            cw_int = int(str(cw)) if cw is not None else None
+        except Exception:
+            cw_int = None
+
+        result[str(league_key)] = cw_int
+
+    return result
+
+
 def get_leagues(
     db: Session,
     user_id: str,
@@ -82,6 +140,8 @@ def get_leagues(
             "season": "2024",
             "scoring_type": "h2h",
             "categories": ["PTS", "REB", "AST", "3PTM", "ST", "BLK", "FG%", "FT%"],
+            # keep FE consistent in dev
+            "current_week": None,
         }]
 
     def _leagues_for_keys(keys: List[str]) -> List[dict]:
@@ -154,9 +214,23 @@ def get_leagues(
         BATCH = 10
         for i in range(0, len(leagues), BATCH):
             chunk = leagues[i:i+BATCH]
+
+            # 1) categories enrichment (existing)
             mapping = _fetch_league_settings(db, user_id, [L["id"] for L in chunk if "id" in L])
             for L in chunk:
                 if L.get("id") in mapping:
                     L["categories"] = mapping[L["id"]]
+
+            # 2) ✅ current_week enrichment (new)
+            cw_map = _fetch_league_current_week(db, user_id, [L["id"] for L in chunk if "id" in L])
+            for L in chunk:
+                lid = L.get("id")
+                if not lid:
+                    continue
+                if lid in cw_map:
+                    L["current_week"] = cw_map[lid]
+                else:
+                    # ensure key exists even if not provided by Yahoo
+                    L.setdefault("current_week", None)
 
     return leagues
