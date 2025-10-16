@@ -57,67 +57,37 @@ def yahoo_get(
     resp.raise_for_status()
     return resp.json()
 
-def yahoo_get(
-    db: Session,
-    user_id: str,
-    path: str,                 # e.g., "/league/466.l.17802/standings"
-    params: Optional[dict] = None,
-) -> dict:
-    """
-    Core Yahoo GET with auto-refresh on 401. Decrypts stored tokens before use.
-    FIXED: safe URL join (no more ...v2league... issues).
-    """
-    uid = (user_id or "").strip()
-    tok = get_latest_token(db, uid)
-    if not tok:
-        count = db.query(OAuthToken).filter(OAuthToken.user_id == uid).count()
-        raise HTTPException(
-            status_code=400,
-            detail=f"No Yahoo OAuth token on file for user_id={uid!r} (rows={count}). Call /auth/login first."
-        )
-
-    access_token = decrypt_value(tok.access_token)
-
-    base = settings.YAHOO_API_BASE.rstrip("/")     # https://fantasysports.yahooapis.com/fantasy/v2
-    rel  = path.lstrip("/")                        # league/466.l.17802/standings
-    url  = f"{base}/{rel}"                         # -> https://.../v2/league/466.l.17802/standings
-
-    q = dict(params or {})
-    q.setdefault("format", "json")
-
-    resp = requests.get(url, headers=_auth_headers(access_token), params=q, timeout=30)
-    if resp.status_code == 401:
-        new_tok = refresh_token(db, uid, tok)
-        access_token = decrypt_value(new_tok.access_token)
-        resp = requests.get(url, headers=_auth_headers(access_token), params=q, timeout=30)
-
-    resp.raise_for_status()
-    return resp.json()
-
-
 def yahoo_raw_get(
     db,
     user_id: str,
-    path: str,                                   # may include query, e.g. "/league/.../scoreboard?week=2"
+    path: str,                                   # may include its own query, e.g. "/league/.../players;status=FA;count=25?foo=bar"
     params: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     Raw Yahoo GET with safe URL join and query merging.
     - Accepts `path` that MAY include its own query string.
-    - Merges caller `params` (from /debug/yahoo/raw), preserving embedded query keys.
+    - Merges caller `params` (from /debug/yahoo/raw), preserving embedded keys.
     - Ensures `format=json` is present.
-    Delegates the actual call to `yahoo_get` (handles tokens + refresh).
+    - Delegates the HTTP call to `yahoo_get` so auth/refresh behavior is identical.
     """
-    # peel embedded query from path and merge with forwarded params
+    # Keep the relative path clean (no leading slash); we'll add one right before calling yahoo_get
+    rel = path.lstrip("/")
+
+    # If the caller embedded a query string in `path`, peel and merge it
     merged: Dict[str, Any] = {}
-    rel = path
     if "?" in rel:
         rel, embedded_qs = rel.split("?", 1)
         merged.update(dict(parse_qsl(embedded_qs, keep_blank_values=True)))
+
+    # Merge forwarded query params from the FastAPI route (excluding `path`)
     if params:
         merged.update(params)
+
+    # Always request JSON unless explicitly provided
     merged.setdefault("format", "json")
 
-    # ensure leading slash for yahoo_get()
-    rel = "/" + rel.lstrip("/")
-    return yahoo_get(db, user_id, rel, params=merged)
+    # Debug (optional): uncomment while testing
+    # print("RAW GET ->", "/" + rel, merged)
+
+    # ✅ Use the proven flow (auth headers + auto-refresh) via yahoo_get
+    return yahoo_get(db=db, user_id=user_id, path="/" + rel, params=merged)

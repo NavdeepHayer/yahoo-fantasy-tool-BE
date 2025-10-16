@@ -136,3 +136,28 @@ def league_standings(
     items[] contain: team_id, team_key, name, manager{guid,nickname,...}, rank, wins, losses, ties, percentage, logo_url?
     """
     return get_league_standings(db, guid, league_id)
+
+@router.get("/league/{league_id}/free-agents", tags=["league"])
+def league_free_agents_raw(
+    league_id: str,
+    status: str = Query("FA"),
+    start: int = Query(0),
+    count: int = Query(25, le=25, ge=1),
+    position: Optional[str] = Query(None),
+    sort: Optional[str] = Query(None),
+    sort_type: Optional[str] = Query(None),
+    out: Optional[str] = Query(None, description="Comma list, e.g. stats,ownership,percent_owned"),
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """
+    **Raw** free agents for a league (no parsing yet).
+    Mirrors the debug route but under the main API.
+    """
+    out_arg = [s.strip() for s in out.split(",")] if out else None
+    return fetch_free_agents_raw(
+        db, user_id, league_id,
+        status=status, start=start, count=count,
+        position=position, sort=sort, sort_type=sort_type,
+        out=out_arg,
+    )
