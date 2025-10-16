@@ -1,6 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
+# app/api/routes_league.py
+from __future__ import annotations
+
+from typing import List, Optional, Dict, Any
+import inspect
+from datetime import date as _date
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any, Tuple
 
 from app.db.session import get_db
 from app.deps import get_user_id, get_current_user
@@ -44,11 +50,15 @@ def league_teams(
         raise HTTPException(status_code=500, detail="Failed to fetch teams")
     return [Team(**t) for t in teams]
 
+
 # ---------------- ROSTER (5m today, "forever" past) ----------------
 @router.get("/team/{team_id}/roster", response_model=Roster)
-def team_roster(
+async def team_roster(
     team_id: str,
-    date: str | None = Query(default=None, description="Optional YYYY-MM-DD to fetch roster on a specific date"),
+    date: str | None = Query(
+        default=None,
+        description="Optional YYYY-MM-DD to fetch roster on a specific date",
+    ),
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
     response: Response = None,
@@ -56,7 +66,6 @@ def team_roster(
     """
     Returns the roster for a specific team. Optionally provide a date in YYYY-MM-DD format.
     """
-    from datetime import date as _date
     # Normalize date default on server if not provided
     date_str = date or _date.today().isoformat()
     ttl = 5 * 60 if date_str == _date.today().isoformat() else 365 * 24 * 60 * 60
@@ -84,9 +93,23 @@ def team_roster(
             raise HTTPException(status_code=400, detail=str(ve))
         except Exception:
             raise HTTPException(status_code=500, detail="Failed to fetch roster")
+
+        # Ensure minimal shape safety for response_model
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=502, detail="Invalid roster shape from service")
+
+        data.setdefault("team_id", team_id)
+        data.setdefault("date", date_str)
+        data.setdefault("players", [])
+
         return Roster(**data)
 
-    return _inner(team_id=team_id, date_str=date_str, db=db, guid=guid, response=response)
+    # Call the decorated function and await if needed (depending on cache wrapper)
+    result = _inner(team_id=team_id, date_str=date_str, db=db, guid=guid, response=response)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
 
 # ---------------- FREE AGENTS (no cache for now) ----------------
 @router.get("/{league_id}/free-agents", response_model=List[FreeAgent])
@@ -105,6 +128,7 @@ def league_free_agents(
         position=position, query=query, count=count, start=start, status=status
     )
 
+
 # ---------------- SCOREBOARD (fix path + no cache for now) ----------------
 @router.get("/{league_id}/scoreboard")
 def league_scoreboard(
@@ -115,6 +139,7 @@ def league_scoreboard(
     user_id: str = Depends(get_user_id),
 ):
     return get_scoreboard(db, user_id, league_id, week=week, enriched=enriched)
+
 
 # ---------------- MATCHUPS SCORES (cache 30m) ----------------
 @router.get("/{league_id}/matchups/scores")
@@ -161,6 +186,7 @@ def league_matchups_scores(
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch league matchups scores")
 
+
 # ---------------- STANDINGS (cache 12h) ----------------
 @router.get("/{league_id}/standings")
 @cache_route(
@@ -182,7 +208,9 @@ def league_standings_route(
     """
     return get_league_standings(db, guid, league_id)
 
+
 # ---------------- RAW free agents passthrough (untouched) ----------------
+# NOTE: This path becomes /league/league/{league_id}/free-agents because the router has prefix="/league".
 @router.get("/league/{league_id}/free-agents", tags=["league"])
 def league_free_agents_raw(
     league_id: str,
