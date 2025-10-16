@@ -17,6 +17,10 @@ from app.services.yahoo import search_free_agents, get_scoreboard
 from app.schemas.free_agent import FreeAgent
 from app.services.yahoo.matchups import get_league_week_matchups_scores
 
+from typing import Dict, Any
+from app.services.yahoo.standings import get_league_standings
+from app.deps import get_current_user
+
 router = APIRouter(prefix="/league", tags=["league"])
 
 @router.get("/{league_id}/teams", response_model=List[Team])
@@ -119,3 +123,16 @@ def league_matchups_scores(
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to fetch league matchups scores")
+
+
+@router.get("/{league_id}/standings")
+def league_standings(
+    league_id: str,
+    db: Session = Depends(get_db),
+    guid: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Normalized standings for a league.
+    items[] contain: team_id, team_key, name, manager{guid,nickname,...}, rank, wins, losses, ties, percentage, logo_url?
+    """
+    return get_league_standings(db, guid, league_id)
