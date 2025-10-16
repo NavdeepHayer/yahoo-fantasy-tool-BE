@@ -6,6 +6,7 @@ from app.api import routes_auth, routes_me, routes_league
 import json, re
 from app.api.routes_debug import router as debug_router
 from app.middleware.cache_log import CacheHeaderLogMiddleware
+from app.api.routes_players import router as players_router, league_router as league_stats_router
 
 app = FastAPI(title=settings.APP_NAME)
 app.add_middleware(CacheHeaderLogMiddleware)
@@ -54,6 +55,8 @@ async def _cors_override(request: Request, call_next):
 app.include_router(routes_auth.router)
 app.include_router(routes_me.router)
 app.include_router(routes_league.router)
+app.include_router(players_router)
+app.include_router(league_stats_router)
 app.include_router(debug_router)
 
 

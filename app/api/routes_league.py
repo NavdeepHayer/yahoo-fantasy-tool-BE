@@ -141,11 +141,11 @@ def league_scoreboard(
     return get_scoreboard(db, user_id, league_id, week=week, enriched=enriched)
 
 
-# ---------------- MATCHUPS SCORES (cache 30m) ----------------
+# ---------------- MATCHUPS SCORES (cache 2m) ----------------
 @router.get("/{league_id}/matchups/scores")
 @cache_route(
     namespace="league_matchups_scores",
-    ttl_seconds=30 * 60,  # 30m
+    ttl_seconds=2 * 60,  # 30m
     key_builder=lambda *args, **kwargs: key_tuple(
         "matchups_scores",
         kwargs["guid"],
@@ -210,29 +210,29 @@ def league_standings_route(
 
 
 # ---------------- RAW free agents passthrough (untouched) ----------------
-# NOTE: This path becomes /league/league/{league_id}/free-agents because the router has prefix="/league".
-@router.get("/league/{league_id}/free-agents", tags=["league"])
-def league_free_agents_raw(
-    league_id: str,
-    status: str = Query("FA"),
-    start: int = Query(0),
-    count: int = Query(25, le=25, ge=1),
-    position: Optional[str] = Query(None),
-    sort: Optional[str] = Query(None),
-    sort_type: Optional[str] = Query(None),
-    out: Optional[str] = Query(None, description="Comma list, e.g. stats,ownership,percent_owned"),
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_user_id),
-):
-    """
-    **Raw** free agents for a league (no parsing yet).
-    Mirrors the debug route but under the main API.
-    """
-    from app.services.yahoo import fetch_free_agents_raw  # local import to avoid unused if not used elsewhere
-    out_arg = [s.strip() for s in out.split(",")] if out else None
-    return fetch_free_agents_raw(
-        db, user_id, league_id,
-        status=status, start=start, count=count,
-        position=position, sort=sort, sort_type=sort_type,
-        out=out_arg,
-    )
+# # NOTE: This path becomes /league/league/{league_id}/free-agents because the router has prefix="/league".
+# @router.get("/league/{league_id}/free-agents", tags=["league"])
+# def league_free_agents_raw(
+#     league_id: str,
+#     status: str = Query("FA"),
+#     start: int = Query(0),
+#     count: int = Query(25, le=25, ge=1),
+#     position: Optional[str] = Query(None),
+#     sort: Optional[str] = Query(None),
+#     sort_type: Optional[str] = Query(None),
+#     out: Optional[str] = Query(None, description="Comma list, e.g. stats,ownership,percent_owned"),
+#     db: Session = Depends(get_db),
+#     user_id: str = Depends(get_user_id),
+# ):
+#     """
+#     **Raw** free agents for a league (no parsing yet).
+#     Mirrors the debug route but under the main API.
+#     """
+#     from app.services.yahoo import fetch_free_agents_raw  # local import to avoid unused if not used elsewhere
+#     out_arg = [s.strip() for s in out.split(",")] if out else None
+#     return fetch_free_agents_raw(
+#         db, user_id, league_id,
+#         status=status, start=start, count=count,
+#         position=position, sort=sort, sort_type=sort_type,
+#         out=out_arg,
+#     )

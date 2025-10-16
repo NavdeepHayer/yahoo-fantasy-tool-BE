@@ -55,3 +55,10 @@ from .scoreboard import get_scoreboard
 upsert_user_from_yahoo = get_current_user_profile
 
 from .client import yahoo_get, yahoo_raw_get 
+
+from .players import (
+    search_players,
+    get_player,
+    get_player_stats,
+    get_team_weekly_totals,
+)
