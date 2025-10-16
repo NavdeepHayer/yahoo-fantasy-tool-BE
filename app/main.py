@@ -5,8 +5,10 @@ from app.core.config import settings
 from app.api import routes_auth, routes_me, routes_league
 import json, re
 from app.api.routes_debug import router as debug_router
+from app.middleware.cache_log import CacheHeaderLogMiddleware
 
 app = FastAPI(title=settings.APP_NAME)
+app.add_middleware(CacheHeaderLogMiddleware)
 
 def _parse_origins(value):
     if isinstance(value, list):
