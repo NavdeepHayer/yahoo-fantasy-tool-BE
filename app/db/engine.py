@@ -13,8 +13,8 @@ connect_args = {}
 engine = create_engine(
     DATABASE_URL or "sqlite:///./app.db",
     pool_pre_ping=True,
-    pool_size=2,       # friendly to free Postgres tiers
-    max_overflow=2,
+    pool_size=10,       # friendly to free Postgres tiers
+    max_overflow=10,
     pool_timeout=5,
     echo=False,
     future=True,
