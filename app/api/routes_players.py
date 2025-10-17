@@ -1,11 +1,11 @@
-from __future__ import annotations
+# app/api/routes_players.py
 
-from typing import List, Optional, Literal
-from fastapi import APIRouter, Depends, Query, Response
+from typing import Annotated, List, Optional, Literal
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.deps import get_current_user  # <-- ADD
+from app.deps import get_current_user
 from app.schemas.player import Player, PlayerSearchResponse
 from app.schemas.stats import PlayerStatLine, TeamWeeklyStats
 from app.services.yahoo.players import (
@@ -14,16 +14,29 @@ from app.services.yahoo.players import (
     get_player,                # fetch single player
     get_player_stats,          # fetch single player stats (league-context for cats)
     get_team_weekly_totals,    # team weekly aggregation (league-context)
+    get_players_stats_batch,   # batch stats
 )
 
-# 🆕 cache utilities (USE YOUR EXISTING ONES)
+# cache utilities (your existing ones)
 from app.services.cache import cache_route, key_tuple
 
-# One router for player-centric endpoints
+# Routers
 router = APIRouter(prefix="/players", tags=["players"])
-# Separate router for league metrics/aggregation
 league_router = APIRouter(prefix="/league", tags=["league-stats"])
 
+# ------------------------------------------------------------
+# Quick debug endpoints (optional)
+# ------------------------------------------------------------
+@router.get("/_ping", tags=["debug"])
+def _ping():
+    return {"ok": True, "who": "players-router"}
+
+@router.get("/_echo", tags=["debug"])
+def _echo(
+    league_id: Annotated[str, Query(description="required")],
+    q: Annotated[str | None, Query(description="optional")] = None,
+):
+    return {"league_id": league_id, "q": q}
 
 # ------------------------------------------------------------
 # STATIC ROUTES FIRST (avoid collisions with dynamic paths)
@@ -42,9 +55,9 @@ league_router = APIRouter(prefix="/league", tags=["league-stats"])
     namespace="players_search",
     ttl_seconds=10 * 60,  # 10m
     key_builder=lambda *a, **k: key_tuple(
-        "search",                      # namespace key
-        k["guid"],                     # per-user cache
-        k["league_id"],                # league universe
+        "search",
+        k["guid"],
+        k["league_id"],
         k.get("q") or "",
         k.get("position") or "",
         k.get("status") or "",
@@ -53,15 +66,14 @@ league_router = APIRouter(prefix="/league", tags=["league-stats"])
     ),
 )
 def search_players_route(
-    league_id: str = Query(..., description="Yahoo league key, e.g. 466.l.17802"),
-    q: Optional[str] = Query(None, description="Free-text search (name/team)"),
-    position: Optional[str] = Query(None, description="e.g. PG, SG, SF, PF, C (NBA) or LW, C, RW, D (NHL)"),
-    status: Optional[str] = Query(None, description="FA | W | T (free agent, waivers, taken)"),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(25, ge=1, le=50),
+    league_id: Annotated[str, Query(description="Yahoo league key, e.g. 466.l.17802")],
+    q: Annotated[str | None, Query(description="Free-text search (name/team)")] = None,
+    position: Annotated[str | None, Query(description="e.g. PG, SG, SF, PF, C (NBA) or LW, C, RW, D (NHL)")] = None,
+    status: Annotated[str | None, Query(description="FA | W | T (free agent, waivers, taken)")] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=50)] = 25,
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
-    response: Response = None,
 ):
     items, next_page = search_players(
         db, league_id, q=q, position=position, status=status, page=page, per_page=per_page
@@ -94,16 +106,15 @@ def search_players_route(
     ),
 )
 def search_players_global_route(
-    q: Optional[str] = Query(None, description="Free-text search (name/team)"),
-    position: Optional[str] = Query(None, description="e.g. PG, SG, C (NBA) / LW, C, RW, D (NHL)"),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(25, ge=1, le=50),
-    game_key: Optional[str] = Query(None, description="Yahoo game key (e.g., 466=NBA 2025, 465=NHL 2025)"),
-    sport: Optional[str] = Query(None, description="nba | nhl | mlb | nfl"),
-    season: Optional[str] = Query(None, description="e.g., 2025"),
+    q: Annotated[str | None, Query(description="Free-text search (name/team)")] = None,
+    position: Annotated[str | None, Query(description="e.g. PG, SG, C (NBA) / LW, C, RW, D (NHL)")] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=50)] = 25,
+    game_key: Annotated[str | None, Query(description="Yahoo game key (e.g., 466=NBA 2025, 465=NHL 2025)")] = None,
+    sport: Annotated[str | None, Query(description="nba | nhl | mlb | nfl")] = None,
+    season: Annotated[str | None, Query(description="e.g., 2025")] = None,
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
-    response: Response = None,
 ):
     items, next_page = search_players_global(
         db,
@@ -119,7 +130,7 @@ def search_players_global_route(
 
 
 # ------------------------------------------------------------
-# DYNAMIC ROUTES — use a safe prefix to avoid collisions
+# DYNAMIC ROUTES — safe prefix to avoid collisions
 # ------------------------------------------------------------
 
 @router.get(
@@ -140,10 +151,9 @@ def search_players_global_route(
 )
 def get_player_by_id_route(
     player_id: str,
-    league_id: Optional[str] = Query(None, description="Optional league key for eligibility context"),
+    league_id: Annotated[str | None, Query(description="Optional league key for eligibility context")] = None,
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
-    response: Response = None,
 ):
     return get_player(db, player_id, league_id=league_id)
 
@@ -159,7 +169,7 @@ def get_player_by_id_route(
 )
 @cache_route(
     namespace="player_stats",
-    ttl_seconds=2 * 60,  # 2m (tune if you want: see note below)
+    ttl_seconds=2 * 60,  # 2m
     key_builder=lambda *a, **k: key_tuple(
         "stats",
         k["guid"],
@@ -174,20 +184,15 @@ def get_player_by_id_route(
 )
 def get_player_stats_by_id_route(
     player_id: str,
-    league_id: str = Query(..., description="League key determines category mapping/scoring context"),
-    season: Optional[str] = Query(None, description="e.g., 2025"),
-    week: Optional[int] = Query(None, description="Matchup/week # for H2H weekly"),
-    date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    kind: Literal["season", "week", "last7", "last14", "last30", "date_range"] = Query("season", 
-                                                                                   pattern="^(season|week|last7|last14|last30|date_range)$"),
+    league_id: Annotated[str, Query(description="League key determines category mapping/scoring context")],
+    season: Annotated[str | None, Query(description="e.g., 2025")] = None,
+    week: Annotated[int | None, Query(description="Matchup/week # for H2H weekly")] = None,
+    date_from: Annotated[str | None, Query(description="YYYY-MM-DD")] = None,
+    date_to: Annotated[str | None, Query(description="YYYY-MM-DD")] = None,
+    kind: Annotated[Literal["season", "week", "last7", "last14", "last30", "date_range"], Query()] = "season",
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
 ):
-    """
-    Handles fetching stats for a player. You can specify the 'kind' (season, week, last7, etc.), and also optionally specify
-    the 'week', 'season', or 'date_from' and 'date_to' ranges.
-    """
     return get_player_stats(
         db,
         player_id,
@@ -200,10 +205,62 @@ def get_player_stats_by_id_route(
     )
 
 
+# --------------------------
+# NEW: Batch stats endpoint
+# --------------------------
+
+@router.get(
+    "/stats/batch",
+    response_model=List[PlayerStatLine],
+    summary="Batch player stats (league-category aware)",
+    description=(
+        "Fetch stats for many players at once. Supports kind=season|week|last7|last14|last30|date_range. "
+        "Internally chunks to Yahoo limits and aggregates per-day when needed."
+    ),
+)
+@cache_route(
+    namespace="player_stats_batch",
+    ttl_seconds=2 * 60,  # 2m
+    key_builder=lambda *a, **k: key_tuple(
+        "stats_batch",
+        k["guid"],
+        k["league_id"],
+        ",".join(sorted(k["player_ids"])) if isinstance(k.get("player_ids"), list) else str(k.get("player_ids") or ""),
+        k.get("kind") or "season",
+        str(k.get("season") or ""),
+        str(k.get("week") or ""),
+        str(k.get("date_from") or ""),
+        str(k.get("date_to") or ""),
+        str(k.get("through_date") or ""),
+    ),
+)
+def get_player_stats_batch_route(
+    league_id: Annotated[str, Query(description="League key determines category mapping/scoring context")],
+    player_ids: Annotated[List[str], Query(description="Repeatable param: ?player_ids=465.p.4240&player_ids=465.p.4064 ...")],
+    season: Annotated[str | None, Query()] = None,
+    week: Annotated[int | None, Query(ge=1)] = None,
+    date_from: Annotated[str | None, Query(description="YYYY-MM-DD")] = None,
+    date_to: Annotated[str | None, Query(description="YYYY-MM-DD")] = None,
+    through_date: Annotated[str | None, Query(description="YYYY-MM-DD (anchor for lastN windows; defaults to league current_date)")] = None,
+    kind: Annotated[Literal["season", "week", "last7", "last14", "last30", "date_range"], Query()] = "season",
+    db: Session = Depends(get_db),
+    guid: str = Depends(get_current_user),
+):
+    return get_players_stats_batch(
+        db,
+        player_ids,
+        league_id=league_id,
+        kind=kind,
+        season=season,
+        week=week,
+        date_from=date_from,
+        date_to=date_to,
+        through_date=through_date,
+    )
+
+
 # ------------------------------------------------------------
 # OPTIONAL BACK-COMPAT ALIASES (hidden from docs)
-# These call the same service functions; caching on primary routes
-# handles most FE paths. If FE still hits these, we can add caching too.
 # ------------------------------------------------------------
 
 @router.get("/{player_id}", response_model=Player, include_in_schema=False)
@@ -216,10 +273,9 @@ def get_player_stats_by_id_route(
 )
 def _alias_get_player_route(
     player_id: str,
-    league_id: Optional[str] = Query(None),
+    league_id: Annotated[str | None, Query()] = None,
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
-    response: Response = None,
 ):
     return get_player(db, player_id, league_id=league_id)
 
@@ -242,15 +298,14 @@ def _alias_get_player_route(
 )
 def _alias_get_player_stats_route(
     player_id: str,
-    league_id: str = Query(...),
-    season: Optional[str] = Query(None),
-    week: Optional[int] = Query(None),
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-    kind: str = Query("season", pattern="^(season|week|last7|last14|last30|date_range)$"),
+    league_id: Annotated[str, Query()],
+    season: Annotated[str | None, Query()] = None,
+    week: Annotated[int | None, Query()] = None,
+    date_from: Annotated[str | None, Query()] = None,
+    date_to: Annotated[str | None, Query()] = None,
+    kind: Annotated[str, Query(pattern="^(season|week|last7|last14|last30|date_range)$")] = "season",
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
-    response: Response = None,
 ):
     return get_player_stats(
         db,
@@ -287,18 +342,17 @@ def _alias_get_player_stats_route(
 )
 def team_weekly_stats_route(
     team_id: str,
-    league_id: str = Query(..., description="League key that defines the categories"),
-    week: int = Query(..., ge=1, description="Matchup/week number"),
+    league_id: Annotated[str, Query(description="League key that defines the categories")],
+    week: Annotated[int, Query(ge=1, description="Matchup/week number")],
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
-    response: Response = None,
 ):
     return get_team_weekly_totals(db, league_id=league_id, team_id=team_id, week=week)
 
 
 @router.get("/debug/raw", tags=["debug"])
 def debug_raw_yahoo(
-    path: str = Query(..., description="Yahoo API path starting with '/' e.g. /game/466/players or /league/466.l.17802/players;player_keys=466.p.4244/stats;type=season"),
+    path: Annotated[str, Query(description="Yahoo API path starting with '/' e.g. /game/466/players or /league/466.l.17802/players;player_keys=466.p.4244/stats;type=season")],
     db: Session = Depends(get_db),
     guid: str = Depends(get_current_user),
 ):

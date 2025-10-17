@@ -1,12 +1,8 @@
-# app/services/yahoo/players.py
-from __future__ import annotations
-
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple , Annotated
 from sqlalchemy.orm import Session
 
 from app.services.yahoo.client import yahoo_get
 from app.db.models import OAuthToken
-
 
 # =========================
 # basics / small utilities
@@ -192,16 +188,11 @@ def _player_from_node(node: Any) -> Dict[str, Any]:
 # league stat id -> key map
 # =========================
 
-# Simple in-memory cache keyed by (user_id, league_id)
 _STAT_CACHE: Dict[tuple[str, str], Dict[str, str]] = {}
 
 def _league_stat_map(db: Session, league_id: str) -> Dict[str, str]:
     """
     Map Yahoo stat_id -> display key (prefer abbr -> display_name -> name).
-    Works for shapes like:
-      stat_categories -> stats -> [{"stat": {...}}, ...]
-    or
-      stat_categories -> stats -> [{...}, ...]
     Caches per (user_id, league_id).
     """
     user_id = _active_user_id(db)
@@ -211,20 +202,16 @@ def _league_stat_map(db: Session, league_id: str) -> Dict[str, str]:
 
     raw = yahoo_get(db, user_id, f"/league/{league_id}/settings")
 
-    # Collect every stats list under stat_categories
     stats_lists: List[List[Dict[str, Any]]] = []
 
     def rec(n: Any):
         if isinstance(n, dict):
-            # Find 'stat_categories' container and pull its inner 'stats' (list)
             if "stat_categories" in n:
                 cat = n["stat_categories"]
-                # It can be a list of dicts or a single dict
                 containers = cat if isinstance(cat, list) else [cat]
                 for c in containers:
                     if isinstance(c, dict) and "stats" in c and isinstance(c["stats"], list):
                         stats_lists.append(c["stats"])
-            # keep walking
             for v in n.values():
                 rec(v)
         elif isinstance(n, list):
@@ -236,7 +223,6 @@ def _league_stat_map(db: Session, league_id: str) -> Dict[str, str]:
     m: Dict[str, str] = {}
 
     def pull_sid_and_name(item: Dict[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-        """Return (sid, abbr, display_name, name) for either {'stat':{...}} or flat {...}."""
         node = item.get("stat") if isinstance(item.get("stat"), dict) else item
         if not isinstance(node, dict):
             return None, None, None, None
@@ -258,13 +244,77 @@ def _league_stat_map(db: Session, league_id: str) -> Dict[str, str]:
                 continue
             key = abbr or disp or name
             if key:
-                # first write wins (avoid overwriting if duplicates)
                 m.setdefault(str(sid), key)
 
-    # cache + return
     _STAT_CACHE[cache_key] = m
     return m
 
+
+# =========================
+# date helpers
+# =========================
+
+from datetime import date, timedelta
+
+def _date_yyyymmdd(s: str) -> date:
+    y, m, d = (int(x) for x in s.split("-"))
+    return date(y, m, d)
+
+def _iter_dates_inclusive(a: str, b: str):
+    start, end = _date_yyyymmdd(a), _date_yyyymmdd(b)
+    if end < start:
+        start, end = end, start
+    cur = start
+    one = timedelta(days=1)
+    while cur <= end:
+        yield cur.isoformat()
+        cur += one
+
+def _sum_into(dst: dict[str, float], src: dict[str, float]) -> None:
+    for k, v in (src or {}).items():
+        dst[k] = dst.get(k, 0.0) + float(v or 0.0)
+
+def _week_bounds(db: Session, user_id: str, league_id: str, week: int) -> tuple[str, str]:
+    raw = yahoo_get(db, user_id, f"/league/{league_id}/scoreboard;week={week}")
+    ws = _find_first(raw, ["week_start", "week-start", "weekStart", "start", "week_start_date"])
+    we = _find_first(raw, ["week_end", "week-end", "weekEnd", "end", "week_end_date"])
+    if not ws or not we:
+        ws = _find_first(raw, ["start_date", "startDate", "start"]) or ws
+        we = _find_first(raw, ["end_date", "endDate", "end"]) or we
+    if not ws or not we:
+        raise ValueError(f"Could not resolve week {week} range from scoreboard for league {league_id}")
+    return str(ws)[:10], str(we)[:10]
+
+def _league_current_date(db: Session, league_id: str) -> str:
+    """
+    Returns league 'current_date' (YYYY-MM-DD). Falls back gracefully.
+    """
+    user_id = _active_user_id(db)
+    raw = yahoo_get(db, user_id, f"/league/{league_id}")
+    cur = _find_first(raw, ["current_date", "currentDate"])
+    if cur and isinstance(cur, str):
+        return cur[:10]
+    wk = _find_first(raw, ["current_week", "currentWeek"])
+    if wk:
+        try:
+            ws, we = _week_bounds(db, user_id, league_id, int(wk))
+            return we
+        except Exception:
+            pass
+    return date.today().isoformat()
+
+def _dates_last_n(db: Session, league_id: str, n: int, through_date: Optional[str] = None) -> List[str]:
+    """
+    Returns last n calendar dates (YYYY-MM-DD), inclusive of through_date (or league current_date).
+    """
+    end = _date_yyyymmdd(through_date) if through_date else _date_yyyymmdd(_league_current_date(db, league_id))
+    one = timedelta(days=1)
+    out: List[str] = []
+    cur = end
+    for _ in range(n):
+        out.append(cur.isoformat())
+        cur -= one
+    return list(reversed(out))
 
 
 # =========================
@@ -280,10 +330,6 @@ def search_players(
     page: int = 1,
     per_page: int = 25,
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
-    """
-    League-scoped search (Yahoo: /league/{league_id}/players;search=...).
-    Works for NBA/NHL and returns normalized items. If nothing with `status`, retries without it.
-    """
     user_id = _active_user_id(db)
     start = (page - 1) * per_page
 
@@ -302,7 +348,6 @@ def search_players(
     raw = yahoo_get(db, user_id, build_path(filters))
     nodes = _find_players(raw, q=q)
 
-    # if empty and we filtered by status, retry without status
     if (not nodes) and status:
         nf = [f for f in filters if not f.startswith("status=")]
         raw = yahoo_get(db, user_id, build_path(nf))
@@ -325,10 +370,6 @@ def get_player(
     player_id: str,
     league_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Fetch one player by Yahoo player_key (e.g. '466.p.4244').
-    If league_id is provided, Yahoo returns league-scoped eligibility.
-    """
     user_id = _active_user_id(db)
     if league_id:
         raw = yahoo_get(db, user_id, f"/league/{league_id}/players;player_keys={player_id}")
@@ -343,9 +384,6 @@ def get_players_batch(
     player_ids: List[str],
     league_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Batch fetch by IDs (1–25 per Yahoo call).
-    """
     user_id = _active_user_id(db)
     ids = [pid for pid in player_ids if pid]
     if not ids:
@@ -384,32 +422,22 @@ def get_player_stats(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Returns a list of PlayerStatLine dicts: {"player_id","scope","values":{<display_key>:float,...}}
-    Robust behavior:
-      - date_range: fan out to per-day calls (type=date;date=YYYY-MM-DD), then sum
-      - week: try Yahoo week first; if empty, aggregate per-day using scoreboard's week range
-    """
     user_id = _active_user_id(db)
 
-    # small inner: fetch one scope path and parse + map ids -> league keys
     def _fetch_and_parse(path: str) -> Dict[str, float]:
         raw = yahoo_get(db, user_id, path)
 
-        # collect all "stats" blocks (player_stats, player_advanced_stats, etc.)
         def _iter_stats_items(node: Any):
             if not isinstance(node, list):
                 return
             for s in node:
                 if not isinstance(s, dict):
                     continue
-                # {"stat": {"stat_id": "...", "value": "..." }}
                 if "stat" in s and isinstance(s["stat"], dict):
                     sid = str(s["stat"].get("stat_id") or s["stat"].get("statId") or s["stat"].get("id") or "")
                     val = s["stat"].get("value")
                     yield sid, val
                     continue
-                # {"stat_id": "...", "value": "..."}
                 sid = str(s.get("stat_id") or s.get("statId") or s.get("id") or "")
                 val = s.get("value") if "value" in s else s.get("val")
                 if sid:
@@ -456,9 +484,7 @@ def get_player_stats(
             pretty[key] = pretty.get(key, 0.0) + float(val or 0.0)
         return pretty
 
-    # --------- KINDS ----------
     if kind == "date_range" and date_from and date_to:
-        # Fan-out day-by-day (Yahoo player endpoint expects 'date', not start/end)
         scope = f"date:{date_from}" if date_from == date_to else f"date_range:{date_from}..{date_to}"
         totals: Dict[str, float] = {}
         for d in _iter_dates_inclusive(date_from, date_to):
@@ -468,13 +494,10 @@ def get_player_stats(
         return [{"player_id": player_id, "scope": scope, "values": totals}]
 
     if kind == "week" and week:
-        # First try Yahoo's native week call
         path = f"/league/{league_id}/players;player_keys={player_id}/stats;type=week;week={week}"
         week_vals = _fetch_and_parse(path)
-        if week_vals:  # success path
+        if week_vals:
             return [{"player_id": player_id, "scope": f"week:{week}", "values": week_vals}]
-
-        # Fallback: resolve week boundaries and aggregate per-day
         ws, we = _week_bounds(db, user_id, league_id, week)
         totals: Dict[str, float] = {}
         for d in _iter_dates_inclusive(ws, we):
@@ -484,67 +507,162 @@ def get_player_stats(
         return [{"player_id": player_id, "scope": f"week:{week}", "values": totals}]
 
     if kind in ("last7", "last14", "last30"):
-        window = kind.replace("last", "")
-        path = f"/league/{league_id}/players;player_keys={player_id}/stats;type=last{window}"
-        vals = _fetch_and_parse(path)
-        return [{"player_id": player_id, "scope": kind, "values": vals}]
+        n = int(kind.replace("last", ""))
+        dates = _dates_last_n(db, league_id, n=n)
+        totals: Dict[str, float] = {}
+        for d in dates:
+            p = f"/league/{league_id}/players;player_keys={player_id}/stats;type=date;date={d}"
+            day_vals = _fetch_and_parse(p)
+            _sum_into(totals, day_vals)
+        return [{"player_id": player_id, "scope": kind, "values": totals}]
 
-    # default: season (optionally explicit season)
     extra = f";season={season}" if season else ""
     path = f"/league/{league_id}/players;player_keys={player_id}/stats;type=season{extra}"
     vals = _fetch_and_parse(path)
     return [{"player_id": player_id, "scope": f"season:{season}" if season else "season", "values": vals}]
 
 
-
-
-def get_team_weekly_totals(
+def get_players_stats_batch(
     db: Session,
+    player_ids: List[str],
     *,
     league_id: str,
-    team_id: str,
-    week: int,
-) -> Dict[str, Any]:
+    kind: str = "season",           # season | week | last7 | last14 | last30 | date_range
+    season: Optional[str] = None,
+    week: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    through_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
-    Sums weekly stats for all players on a team for the given week.
+    Multi-player stats, chunk-aware, with per-day aggregation for lastN/week fallback/date_range.
+    Returns: List[PlayerStatLine] aligned to input order.
     """
     user_id = _active_user_id(db)
+    ids = [pid for pid in player_ids if pid]
+    if not ids:
+        return []
 
-    raw = yahoo_get(db, user_id, f"/team/{team_id}/roster;week={week}")
-    player_nodes = _find_players(raw)
+    id2key = _league_stat_map(db, league_id)
 
-    totals: Dict[str, float] = {}
-    per_player: List[Dict[str, Any]] = []
+    def _parse_stats_list(stats_list: Any) -> Dict[str, float]:
+        acc: Dict[str, float] = {}
+        if not isinstance(stats_list, list):
+            return acc
+        for s in stats_list:
+            if not isinstance(s, dict):
+                continue
+            node = s.get("stat") if isinstance(s.get("stat"), dict) else s
+            sid = str(node.get("stat_id") or node.get("statId") or node.get("id") or "")
+            val = node.get("value")
+            if not sid:
+                continue
+            if val in (None, "", "-"):
+                fval = 0.0
+            else:
+                try:
+                    fval = float(val)
+                except Exception:
+                    try:
+                        fval = float(str(val).replace("%", ""))
+                    except Exception:
+                        fval = 0.0
+            acc[sid] = acc.get(sid, 0.0) + fval
+        pretty: Dict[str, float] = {}
+        for sid, v in acc.items():
+            key = id2key.get(sid) or sid
+            pretty[key] = pretty.get(key, 0.0) + float(v or 0.0)
+        return pretty
 
-    for n in player_nodes:
-        pid = _find_first(n, ["player_id", "playerId", "player_key", "playerKey"])
-        if not pid:
-            continue
-        stat_lines = get_player_stats(
-            db,
-            pid,
-            league_id=league_id,
-            kind="week",
-            week=week,
-        )
-        if not stat_lines:
-            continue
-        vals = stat_lines[0]["values"]
-        for k, v in vals.items():
-            totals[k] = totals.get(k, 0.0) + float(v or 0.0)
-        per_player.append({
-            "player_id": pid,
-            "scope": f"week:{week}",
-            "values": vals,
-        })
+    def _parse_players_blob(raw: Any) -> Dict[str, Dict[str, float]]:
+        out: Dict[str, Dict[str, float]] = {}
+        nodes = _find_players(raw)
+        for n in nodes:
+            pid = _find_first(n, ["player_key", "playerKey", "player_id", "playerId"])
+            if not pid:
+                continue
+            merged: Dict[str, float] = {}
+            def rec(x: Any):
+                if isinstance(x, dict):
+                    if "stats" in x and isinstance(x["stats"], list):
+                        vals = _parse_stats_list(x["stats"])
+                        for k, v in vals.items():
+                            merged[k] = merged.get(k, 0.0) + float(v or 0.0)
+                    for v in x.values():
+                        rec(v)
+                elif isinstance(x, list):
+                    for y in x:
+                        rec(y)
+            rec(n)
+            if merged:
+                out[str(pid)] = merged
+        return out
 
-    return {
-        "league_id": league_id,
-        "team_id": team_id,
-        "week": week,
-        "totals": totals,
-        "players": per_player,
-    }
+    CHUNK = 25
+    results: Dict[str, Dict[str, float]] = {pid: {} for pid in ids}
+
+    def _sum_player_into(dstmap: Dict[str, Dict[str, float]], srcmap: Dict[str, Dict[str, float]]) -> None:
+        for pid, vals in srcmap.items():
+            d = dstmap.setdefault(pid, {})
+            for k, v in (vals or {}).items():
+                d[k] = d.get(k, 0.0) + float(v or 0.0)
+
+    # ---- scopes ----
+
+    if kind == "season":
+        extra = f";season={season}" if season else ""
+        for i in range(0, len(ids), CHUNK):
+            keys = ",".join(ids[i:i+CHUNK])
+            raw = yahoo_get(db, user_id, f"/league/{league_id}/players;player_keys={keys}/stats;type=season{extra}")
+            _sum_player_into(results, _parse_players_blob(raw))
+        return [{"player_id": pid, "scope": f"season:{season}" if season else "season", "values": results.get(pid, {})}
+                for pid in ids]
+
+    if kind == "week" and week:
+        did_any = False
+        for i in range(0, len(ids), CHUNK):
+            keys = ",".join(ids[i:i+CHUNK])
+            raw = yahoo_get(db, user_id, f"/league/{league_id}/players;player_keys={keys}/stats;type=week;week={week}")
+            parsed = _parse_players_blob(raw)
+            if parsed:
+                did_any = True
+                _sum_player_into(results, parsed)
+        if did_any:
+            return [{"player_id": pid, "scope": f"week:{week}", "values": results.get(pid, {})} for pid in ids]
+
+        ws, we = _week_bounds(db, user_id, league_id, week)
+        for d in _iter_dates_inclusive(ws, we):
+            for i in range(0, len(ids), CHUNK):
+                keys = ",".join(ids[i:i+CHUNK])
+                raw = yahoo_get(db, user_id, f"/league/{league_id}/players;player_keys={keys}/stats;type=date;date={d}")
+                _sum_player_into(results, _parse_players_blob(raw))
+        return [{"player_id": pid, "scope": f"week:{week}", "values": results.get(pid, {})} for pid in ids]
+
+    if kind in ("last7", "last14", "last30"):
+        n = int(kind.replace("last", ""))
+        dates = _dates_last_n(db, league_id, n=n, through_date=through_date)
+        for d in dates:
+            for i in range(0, len(ids), CHUNK):
+                keys = ",".join(ids[i:i+CHUNK])
+                raw = yahoo_get(db, user_id, f"/league/{league_id}/players;player_keys={keys}/stats;type=date;date={d}")
+                _sum_player_into(results, _parse_players_blob(raw))
+        return [{"player_id": pid, "scope": kind, "values": results.get(pid, {})} for pid in ids]
+
+    if kind == "date_range" and date_from and date_to:
+        for d in _iter_dates_inclusive(date_from, date_to):
+            for i in range(0, len(ids), CHUNK):
+                keys = ",".join(ids[i:i+CHUNK])
+                raw = yahoo_get(db, user_id, f"/league/{league_id}/players;player_keys={keys}/stats;type=date;date={d}")
+                _sum_player_into(results, _parse_players_blob(raw))
+        scope = f"date:{date_from}" if date_from == date_to else f"date_range:{date_from}..{date_to}"
+        return [{"player_id": pid, "scope": scope, "values": results.get(pid, {})} for pid in ids]
+
+    # default -> season
+    for i in range(0, len(ids), CHUNK):
+        keys = ",".join(ids[i:i+CHUNK])
+        raw = yahoo_get(db, user_id, f"/league/{league_id}/players;player_keys={keys}/stats;type=season")
+        _sum_player_into(results, _parse_players_blob(raw))
+    return [{"player_id": pid, "scope": "season", "values": results.get(pid, {})} for pid in ids]
 
 
 # =========================
@@ -594,9 +712,6 @@ def search_players_global(
     season: Optional[str] = None,
     game_key: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
-    """
-    League-agnostic player search (Yahoo: /game/{game_key}/players;search=...).
-    """
     user_id = _active_user_id(db)
     gkey = _resolve_game_key(db, sport=sport, season=season, game_key=game_key)
 
@@ -619,7 +734,6 @@ def search_players_global(
         if pid and pid not in seen:
             items_unfiltered.append(c); seen.add(pid)
 
-    # token fallback (first/last) only if nothing matched
     if not items_unfiltered and q and " " in q:
         first, last = q.split()[0], q.split()[-1]
         for part in (first, last):
@@ -630,7 +744,6 @@ def search_players_global(
                 if pid2 and pid2 not in seen:
                     items_unfiltered.append(c2); seen.add(pid2)
 
-    # If a query is present, filter to real matches; otherwise return all
     if q:
         ql = q.lower()
         items = [it for it in items_unfiltered
@@ -644,25 +757,18 @@ def search_players_global(
 
 
 def _get_league_season(db: Session, league_id: str) -> Optional[str]:
-    """
-    Fetch the league to discover its season (e.g. '2025').
-    If Yahoo responds in an unexpected shape, we try a couple nests.
-    """
     user_id = _active_user_id(db)
     try:
         raw = yahoo_get(db, user_id, f"/league/{league_id}")
     except Exception:
         return None
 
-    # Try the common shapes
-    # A) fantasy_content -> league -> [{...}, {"season": "2025"}, ...]
     node = raw.get("fantasy_content", {}).get("league")
     if isinstance(node, list):
         for piece in node:
             if isinstance(piece, dict) and "season" in piece and piece["season"]:
                 return str(piece["season"])
 
-    # B) nested dicts
     def _find_season(n: Any) -> Optional[str]:
         if isinstance(n, dict):
             if "season" in n and n["season"]:
@@ -681,45 +787,47 @@ def _get_league_season(db: Session, league_id: str) -> Optional[str]:
     return _find_season(raw)
 
 
-# --- add near the top of this file (helpers) -------------------------------
+def get_team_weekly_totals(
+    db: Session,
+    *,
+    league_id: str,
+    team_id: str,
+    week: int,
+) -> Dict[str, Any]:
+    user_id = _active_user_id(db)
 
-from datetime import date, timedelta
+    raw = yahoo_get(db, user_id, f"/team/{team_id}/roster;week={week}")
+    player_nodes = _find_players(raw)
 
-def _date_yyyymmdd(s: str) -> date:
-    # safe parse YYYY-MM-DD
-    y, m, d = (int(x) for x in s.split("-"))
-    return date(y, m, d)
+    totals: Dict[str, float] = {}
+    per_player: List[Dict[str, Any]] = []
 
-def _iter_dates_inclusive(a: str, b: str):
-    start, end = _date_yyyymmdd(a), _date_yyyymmdd(b)
-    if end < start:
-        start, end = end, start
-    cur = start
-    one = timedelta(days=1)
-    while cur <= end:
-        yield cur.isoformat()
-        cur += one
+    for n in player_nodes:
+        pid = _find_first(n, ["player_id", "playerId", "player_key", "playerKey"])
+        if not pid:
+            continue
+        stat_lines = get_player_stats(
+            db,
+            pid,
+            league_id=league_id,
+            kind="week",
+            week=week,
+        )
+        if not stat_lines:
+            continue
+        vals = stat_lines[0]["values"]
+        for k, v in vals.items():
+            totals[k] = totals.get(k, 0.0) + float(v or 0.0)
+        per_player.append({
+            "player_id": pid,
+            "scope": f"week:{week}",
+            "values": vals,
+        })
 
-def _week_bounds(db: Session, user_id: str, league_id: str, week: int) -> tuple[str, str]:
-    """
-    Get (week_start, week_end) as YYYY-MM-DD from the league scoreboard.
-    Works even for 'date' roster leagues.
-    """
-    raw = yahoo_get(db, user_id, f"/league/{league_id}/scoreboard;week={week}")
-    # try common keys
-    ws = _find_first(raw, ["week_start", "week-start", "weekStart", "start", "week_start_date"])
-    we = _find_first(raw, ["week_end", "week-end", "weekEnd", "end", "week_end_date"])
-    if not ws or not we:
-        # last resort: look for 'start'/'end' shaped dates anywhere
-        ws = _find_first(raw, ["start_date", "startDate", "start"]) or ws
-        we = _find_first(raw, ["end_date", "endDate", "end"]) or we
-    if not ws or not we:
-        raise ValueError(f"Could not resolve week {week} range from scoreboard for league {league_id}")
-    # Normalize to YYYY-MM-DD (in case timestamps sneak in)
-    ws = str(ws)[:10]
-    we = str(we)[:10]
-    return ws, we
-
-def _sum_into(dst: dict[str, float], src: dict[str, float]) -> None:
-    for k, v in (src or {}).items():
-        dst[k] = dst.get(k, 0.0) + float(v or 0.0)
+    return {
+        "league_id": league_id,
+        "team_id": team_id,
+        "week": week,
+        "totals": totals,
+        "players": per_player,
+    }
