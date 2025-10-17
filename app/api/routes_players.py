@@ -22,6 +22,9 @@ from app.services.yahoo.players import (
 # cache utilities (your existing ones)
 from app.services.cache import cache_route, key_tuple
 
+from time import time
+from threading import RLock
+
 # Routers
 router = APIRouter(prefix="/players", tags=["players"])
 league_router = APIRouter(prefix="/league", tags=["league-stats"])
@@ -138,7 +141,55 @@ from typing import Tuple, Dict, List, Any
 import heapq
 from datetime import date, timedelta
 
+# ---- 5-minute snapshot cache for the FAST PATH (fetch-all mode) ----
+_SNAPSHOT_TTL_SECONDS = 300  # 5 minutes
+_SNAPSHOT_CACHE: Dict[tuple, tuple[float, List[dict]]] = {}
+_SNAPSHOT_LOCK = RLock()
+
+def _snapshot_get(key: tuple) -> List[dict] | None:
+    now = time()
+    with _SNAPSHOT_LOCK:
+        hit = _SNAPSHOT_CACHE.get(key)
+        if not hit:
+            return None
+        ts, data = hit
+        if now - ts > _SNAPSHOT_TTL_SECONDS:
+            _SNAPSHOT_CACHE.pop(key, None)
+            return None
+        # return a shallow copy to avoid accidental mutation
+        return list(data)
+
+def _snapshot_put(key: tuple, data: List[dict]) -> None:
+    with _SNAPSHOT_LOCK:
+        # store a shallow copy
+        _SNAPSHOT_CACHE[key] = (time(), list(data))
+
 # --- helpers ---
+def _yahoo_rank_value(d: Dict[str, Any]) -> int | None:
+    """
+    Read any Yahoo-like ranking field from the item.
+    Smaller is better (rank #1 is best). Return None if not found.
+    """
+    for k in ("yahoo_rank", "rank", "overall_rank", "preseason_rank"):
+        v = d.get(k)
+        if v is None:
+            continue
+        try:
+            return int(v)
+        except Exception:
+            continue
+    return None
+
+def _sort_all_by_yahoo(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Sort items that have a numeric rank first (ascending),
+    then those without rank (stable name tiebreaker).
+    """
+    def keyfn(d: Dict[str, Any]):
+        r = _yahoo_rank_value(d)
+        return (r is None, r if r is not None else 10**9, (d.get("name") or "").lower())
+    return sorted(items, key=keyfn)
+
 def _parse_sort_list(sort_by: List[str]) -> List[Tuple[str, int]]:
     out: List[Tuple[str, int]] = []
     for s in sort_by:
@@ -344,28 +395,61 @@ def search_players_ranked_route(
     parsed_sort = _parse_sort_list(sort_by)
     no_filters = (not parsed_sort) and (not gte) and (not lte)
 
-    # ---------- Fast path: Yahoo default ordering ----------
+    # ---------- Fast path: Yahoo default ordering (FETCH ALL, THEN SORT, RETURN ALL) ----------
     if no_filters:
+        # 1) Try 5-min snapshot cache (per league + q + position + status)
+        snap_key = (league_id, (q or ""), (position or ""), (status or ""))
+        cached = _snapshot_get(snap_key)
+        if cached is not None:
+            return PlayerSearchResponse(
+                items=cached,
+                page=1,
+                per_page=len(cached),
+                next_page=None,
+                cursor={"cached": True, "next_page": None},
+            )  # type: ignore
+
+        # 2) Cache miss → crawl ALL pages so FE can cache + client-search locally.
         collected: List[dict] = []
         current_page = cursor_next_page or 1
         page_size = 25
         scanned_pages = 0
-        while len(collected) < per_page and scanned_pages < scan_pages:
+
+        while True:
             page_items, next_page = search_players(
                 db, league_id, q=q, position=position, status=status, page=current_page, per_page=page_size
             )
             if not page_items:
                 break
+
             for p in page_items:
                 payload = _to_payload(p)
                 collected.append(payload)
-                if len(collected) >= per_page:
-                    break
+
             scanned_pages += 1
-            current_page += 1
+
+            # If provider gives explicit next_page, follow it; otherwise increment.
             if next_page is None:
-                break
-        return PlayerSearchResponse(items=collected[:per_page], page=1, per_page=per_page, next_page=None)  # type: ignore
+                current_page += 1
+                # Optional early-exit when last page is short.
+                if len(page_items) < page_size:
+                    break
+            else:
+                current_page = next_page
+
+        # 3) Global sort by Yahoo-like rank fields (lowest rank first), then name.
+        collected = _sort_all_by_yahoo(collected)
+
+        # 4) Snapshot it for 5 minutes and return EVERYTHING; FE will filter/search client-side.
+        _snapshot_put(snap_key, collected)
+
+        return PlayerSearchResponse(
+            items=collected,
+            page=1,
+            per_page=len(collected),
+            next_page=None,
+            cursor={"scanned": scanned_pages, "next_page": None, "cached": False},
+        )  # type: ignore 
 
     # ---------- Ranked scan with stats ----------
     if not parsed_sort:

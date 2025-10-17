@@ -7,9 +7,12 @@ import json, re
 from app.api.routes_debug import router as debug_router
 from app.middleware.cache_log import CacheHeaderLogMiddleware
 from app.api.routes_players import router as players_router, league_router as league_stats_router
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import ORJSONResponse
 
-app = FastAPI(title=settings.APP_NAME)
+app = FastAPI(title=settings.APP_NAME,default_response_class=ORJSONResponse)
 app.add_middleware(CacheHeaderLogMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=512)
 
 def _parse_origins(value):
     if isinstance(value, list):

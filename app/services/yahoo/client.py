@@ -9,6 +9,26 @@ from app.db.models import OAuthToken
 from app.services.yahoo.oauth import get_latest_token, refresh_token
 from urllib.parse import parse_qsl
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+# Reusable HTTPS session to avoid TLS handshake per page
+_YAHOO_SESSION = requests.Session()
+_adapter = HTTPAdapter(
+    pool_connections=8,  # keep a few pooled sockets
+    pool_maxsize=16,
+    max_retries=Retry(
+        total=2,
+        backoff_factor=0.3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    ),
+)
+_YAHOO_SESSION.mount("https://", _adapter)
+_YAHOO_SESSION.headers.update({"User-Agent": "YahooFantasyTool/1.0"})
+
 def _auth_headers(access_token: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {access_token}"}
 
@@ -27,8 +47,8 @@ def yahoo_get(
     params: Optional[dict] = None,
 ) -> dict:
     """
-    Core Yahoo GET with auto-refresh on 401. Mirrors original behavior,
-    but decrypts stored tokens before use and surfaces upstream error bodies.
+    Core Yahoo GET with auto-refresh on 401.
+    Now uses a persistent requests.Session for connection reuse & retries.
     """
     uid = (user_id or "").strip()
     tok = get_latest_token(db, uid)
@@ -36,21 +56,22 @@ def yahoo_get(
         count = db.query(OAuthToken).filter(OAuthToken.user_id == uid).count()
         raise HTTPException(
             status_code=400,
-            detail=f"No Yahoo OAuth token on file for user_id={uid!r} (rows={count}). Call /auth/login and complete the flow first."
+            detail=f"No Yahoo OAuth token on file for user_id={uid!r} (rows={count}). Call /auth/login and complete the flow first.",
         )
 
     access_token = decrypt_value(tok.access_token)
-    base = settings.YAHOO_API_BASE.rstrip("/")      # https://fantasysports.yahooapis.com/fantasy/v2
-    rel  = path.lstrip("/")                         # e.g., league/465.l.34067/players;.../stats;type=week;week=2
-    url  = f"{base}/{rel}"
+    base = settings.YAHOO_API_BASE.rstrip("/")
+    rel = path.lstrip("/")
+    url = f"{base}/{rel}"
     q = dict(params or {})
     q.setdefault("format", "json")
 
-    resp = requests.get(url, headers=_auth_headers(access_token), params=q, timeout=30)
+    # use shared session
+    resp = _YAHOO_SESSION.get(url, headers=_auth_headers(access_token), params=q, timeout=20)
     if resp.status_code == 401:
         new_tok = refresh_token(db, uid, tok)
         access_token = decrypt_value(new_tok.access_token)
-        resp = requests.get(url, headers=_auth_headers(access_token), params=q, timeout=30)
+        resp = _YAHOO_SESSION.get(url, headers=_auth_headers(access_token), params=q, timeout=20)
 
     if not resp.ok:
         _raise_with_yahoo_body(resp)
