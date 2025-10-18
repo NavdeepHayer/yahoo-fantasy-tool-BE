@@ -10,6 +10,7 @@ from app.api.routes_players import router as players_router, league_router as le
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse
 from app.api import routes_scheduling
+from app.api.routes_ranking import router as ranking_router
 
 app = FastAPI(title=settings.APP_NAME,default_response_class=ORJSONResponse)
 app.add_middleware(CacheHeaderLogMiddleware)
@@ -63,7 +64,7 @@ app.include_router(players_router)
 app.include_router(league_stats_router)
 app.include_router(debug_router)
 app.include_router(routes_scheduling.router)
-
+app.include_router(ranking_router)
 
 @app.get("/health")
 def health():
