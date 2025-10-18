@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class Team(BaseModel):
     id: str
@@ -11,6 +11,7 @@ class RosterPlayer(BaseModel):
     name: str
     positions: List[str] = []
     status: str | None = None  # ACTIVE/BN/IR etc.
+    slot: Optional[str] = None
 
 class Roster(BaseModel):
     team_id: str

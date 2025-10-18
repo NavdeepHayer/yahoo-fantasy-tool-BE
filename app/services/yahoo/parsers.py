@@ -1,6 +1,7 @@
+from __future__ import annotations
 from typing import Any, List, Tuple, Optional
 
-# ---- Small utils (pure, parser-local) ----
+# ---------------- Small utils ----------------
 def _get(d: Any, *keys) -> Any:
     cur = d
     for k in keys:
@@ -17,8 +18,106 @@ def _as_list(x: Any) -> List:
         return x
     return [x]
 
+def _coalesce_str(*vals):
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
 
-# ---- Leagues ----
+def _deep_first_position(val) -> str | None:
+    """
+    Recursively search dict/list nodes for a string under common keys ONLY:
+    'position', 'abbr', 'pos', 'display_position'. Do NOT return arbitrary strings
+    (e.g., 'date' from coverage_type), only those found under the keys above.
+    """
+    KEYS = ("position", "abbr", "pos", "display_position")
+
+    # If the value is already a string, we only accept it if the caller passed it
+    # directly (we won't hit this path during 'scan other keys' — see below).
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+
+    if isinstance(val, dict):
+        # 1) Look at our known keys first
+        for k in KEYS:
+            v = val.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+            if isinstance(v, (dict, list)):
+                got = _deep_first_position(v)
+                if got:
+                    return got
+        # 2) Recurse ONLY into child dict/list values (avoid returning raw strings
+        # like "date" from coverage_type/date blocks)
+        for v in val.values():
+            if isinstance(v, (dict, list)):
+                got = _deep_first_position(v)
+                if got:
+                    return got
+        return None
+
+    if isinstance(val, list):
+        for item in val:
+            got = _deep_first_position(item)
+            if got:
+                return got
+        return None
+
+    return None
+
+def _deep_find_any(node, keys=("selected_position", "selected_positions", "selected_position_list",
+                                "roster_position", "current_position", "assigned_slot", "slot")):
+    """
+    Recursively find the first value under any of the provided keys.
+    Returns the value (can be str|dict|list) or None.
+    """
+    if isinstance(node, dict):
+        # direct hit
+        for k in keys:
+            if k in node:
+                return node[k]
+        # scan deeper
+        for v in node.values():
+            found = _deep_find_any(v, keys)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _deep_find_any(item, keys)
+            if found is not None:
+                return found
+    return None
+
+def _extract_selected_slot(container: dict, flat_player: dict | None = None) -> str | None:
+    """
+    Ultra-robust slot extractor. Looks for aliases anywhere on the roster item
+    (container and flattened player node), then resolves to a displayable slot.
+    """
+    # 1) simple aliases if they are strings
+    direct = _coalesce_str(
+        container.get("slot"),
+        container.get("roster_position"),
+        container.get("current_position"),
+        container.get("assigned_slot"),
+    ) or (flat_player and _coalesce_str(
+        flat_player.get("slot"),
+        flat_player.get("roster_position"),
+        flat_player.get("current_position"),
+        flat_player.get("assigned_slot"),
+    ))
+    if direct:
+        return direct.upper()
+
+    # 2) deep search for any of the keys (including selected_position-tree)
+    cand = _deep_find_any(container) or (flat_player and _deep_find_any(flat_player))
+    if cand is None:
+        return None
+
+    # If the candidate is a string, use it. If object/list, dive for first 'position'/'abbr'/etc
+    pos = _deep_first_position(cand) if not isinstance(cand, str) else cand
+    return pos.upper() if isinstance(pos, str) and pos.strip() else None
+
+# ---------------- Leagues ----------------
 def parse_leagues(payload: dict) -> List[dict]:
     """Parse leagues whether Yahoo nests under users→games or at top-level, and scan all indices (0..count-1)."""
     fc = payload.get("fantasy_content", {})
@@ -87,8 +186,7 @@ def parse_leagues(payload: dict) -> List[dict]:
 
     return out
 
-
-# ---- Teams ----
+# ---------------- Teams ----------------
 def parse_teams(payload: dict, league_id: str) -> List[dict]:
     """
     Robust teams parser for Yahoo's NHL/NBA responses.
@@ -172,13 +270,12 @@ def parse_teams(payload: dict, league_id: str) -> List[dict]:
 
     return deduped
 
-
-# ---- Roster (basic version; same behavior as your current code) ----
+# ---------------- Roster (emits assigned lineup slot) ----------------
 def parse_roster(payload: dict, team_id: str) -> Tuple[str, List[dict]]:
     """
     Robust NHL-friendly roster parser.
 
-    Returns (date, players[ {player_id, name, positions, status} ]).
+    Returns (date, players[ {player_id, name, positions, status, slot?} ]).
     """
     def find_roster(node: Any) -> Optional[dict]:
         if isinstance(node, dict):
@@ -255,7 +352,7 @@ def parse_roster(payload: dict, team_id: str) -> Tuple[str, List[dict]]:
     if not isinstance(players_container, dict):
         return str(date), []
 
-    players_raw: List[dict] = []
+    players_raw: List[tuple[dict, dict]] = []  # (container_item, flat_player)
     for k, v in players_container.items():
         if not str(k).isdigit() or not isinstance(v, dict):
             continue
@@ -264,32 +361,31 @@ def parse_roster(payload: dict, team_id: str) -> Tuple[str, List[dict]]:
             continue
         flat = flatten_player_node(p)
         if isinstance(flat, dict):
-            players_raw.append(flat)
+            players_raw.append((v, flat))   # keep container 'v' to read selected_position sibling
 
     out: List[dict] = []
-    for obj in players_raw:
+    for container, obj in players_raw:
         pid = obj.get("player_id")
-        pname = None
         nm = obj.get("name")
-        if isinstance(nm, dict):
-            pname = nm.get("full") or nm.get("name")
-        elif isinstance(nm, str):
-            pname = nm
+        pname = nm.get("full") if isinstance(nm, dict) else (nm if isinstance(nm, str) else None)
         positions = extract_positions(obj)
         status = obj.get("status") or None
+
+        # assigned slot (robust)
+        slot = _extract_selected_slot(container, obj)
+
         if pid and pname:
             out.append({
-                "player_id": str(pid),
+                "player_id": str(pid),          # numeric is fine; FE normalizes with game key
                 "name": str(pname),
                 "positions": positions,
                 "status": status,
+                "slot": slot,                   # <-- now included
             })
 
     return (str(date), out)
 
-
-# --- Minimal scoreboard parsing (league scoreboard;week=N) ---
-
+# ---------------- Scoreboard (minimal & enriched) ----------------
 def _normalize_team_name(team_obj: dict) -> str | None:
     nm = team_obj.get("name")
     if isinstance(nm, str):
@@ -301,24 +397,9 @@ def _normalize_team_name(team_obj: dict) -> str | None:
     return None
 
 def parse_scoreboard_min(payload: dict) -> dict:
-    """
-    Returns a dict:
-    {
-      "week": <int|None>,
-      "start_date": <str|None>,
-      "end_date": <str|None>,
-      "matchups": [
-        {"team1_key": str, "team1_name": str|None,
-         "team2_key": str, "team2_name": str|None,
-         "status": str|None, "is_playoffs": bool|None}
-      ]
-    }
-    This is a tolerant, minimal extractor (no scores/categories yet).
-    """
     fc = payload.get("fantasy_content", {})
     out = {"week": None, "start_date": None, "end_date": None, "matchups": []}
 
-    # Try to find a "scoreboard" node
     league_node = None
     L = fc.get("league")
     if isinstance(L, list) and len(L) >= 2:
@@ -330,7 +411,6 @@ def parse_scoreboard_min(payload: dict) -> dict:
     if isinstance(league_node, dict):
         scoreboard = league_node.get("scoreboard") or league_node.get("scoreboards")
 
-    # week meta
     if isinstance(scoreboard, dict):
         out["week"] = scoreboard.get("week") or scoreboard.get("current_week")
         out["start_date"] = scoreboard.get("start_date")
@@ -345,7 +425,6 @@ def parse_scoreboard_min(payload: dict) -> dict:
                 if not isinstance(m, (dict, list)):
                     continue
 
-                # normalize matchup object (dict or list of dict fragments)
                 if isinstance(m, list):
                     m_agg = {}
                     for part in m:
@@ -353,16 +432,13 @@ def parse_scoreboard_min(payload: dict) -> dict:
                             m_agg.update(part)
                     m = m_agg
 
-                # read teams inside matchup
                 teams_node = m.get("teams")
                 t1_key = t1_name = t2_key = t2_name = None
                 if isinstance(teams_node, dict):
-                    # Yahoo usually has "0" and "1" entries
                     for tk, tv in teams_node.items():
                         if not str(tk).isdigit() or not isinstance(tv, dict):
                             continue
                         t = tv.get("team")
-                        # "team" can be list of fragments or dict
                         if isinstance(t, list):
                             t_agg = {}
                             for part in t:
@@ -393,16 +469,16 @@ def parse_scoreboard_min(payload: dict) -> dict:
     return out
 
 def select_matchup_for_team(scoreboard_min: dict, my_team_key: str) -> dict | None:
+    """
+    Given the minimal scoreboard dict from parse_scoreboard_min, return the matchup
+    that involves my_team_key (team key like "465.l.34067.t.11"), or None if not found.
+    """
     for m in scoreboard_min.get("matchups", []):
         if m.get("team1_key") == my_team_key or m.get("team2_key") == my_team_key:
             return m
     return None
 
-
-# ---- Enriched scoreboard parsing (categories + points) ----
-
 def _flatten_team_obj(obj):
-    """Team node can be a dict or a list of tiny dicts."""
     if isinstance(obj, dict):
         return obj
     if isinstance(obj, list):
@@ -414,17 +490,11 @@ def _flatten_team_obj(obj):
     return {}
 
 def _collect_team_stats(team_node) -> dict:
-    """
-    From the team block (which includes a second element holding 'team_stats' etc.),
-    return {stat_id: value} (string values as Yahoo provides).
-    """
     stats_by_id = {}
-    # team_node is usually [ [<team fields...>], {team_stats: {...}}, {team_points: {...}}, ...]
     if isinstance(team_node, list) and len(team_node) >= 2 and isinstance(team_node[1], dict):
         ts = team_node[1].get("team_stats")
         if isinstance(ts, dict):
             stats = ts.get("stats")
-            # stats may be a list of {"stat":{stat_id,value}} or dict with numeric keys
             if isinstance(stats, list):
                 for item in stats:
                     if isinstance(item, dict):
@@ -458,27 +528,9 @@ def _collect_team_points(team_node) -> float | None:
     return None
 
 def parse_scoreboard_enriched(payload: dict) -> dict:
-    """
-    Returns:
-    {
-      "week": int|None,
-      "start_date": str|None,
-      "end_date": str|None,
-      "matchups": [
-        {
-          "status": str|None,
-          "is_playoffs": bool|None,
-          "team1": {"key": str, "name": str|None, "points": float|None, "stats": {stat_id: value}},
-          "team2": {"key": str, "name": str|None, "points": float|None, "stats": {stat_id: value}},
-          "winners": [{"stat_id": str, "winner_team_key": str|None, "is_tied": bool}],
-        }
-      ]
-    }
-    """
     fc = payload.get("fantasy_content", {})
     out = {"week": None, "start_date": None, "end_date": None, "matchups": []}
 
-    # locate scoreboard
     league_node = None
     L = fc.get("league")
     if isinstance(L, list) and len(L) >= 2:
@@ -508,7 +560,6 @@ def parse_scoreboard_enriched(payload: dict) -> dict:
         if not isinstance(m, (dict, list)):
             continue
 
-        # flatten matchup
         if isinstance(m, list):
             m_agg = {}
             for part in m:
@@ -519,30 +570,6 @@ def parse_scoreboard_enriched(payload: dict) -> dict:
         status = m.get("status")
         is_playoffs = bool(m.get("is_playoffs")) if "is_playoffs" in m else None
 
-        # winners list
-        winners = []
-        sw = m.get("stat_winners")
-        if isinstance(sw, list):
-            for item in sw:
-                if isinstance(item, dict):
-                    w = item.get("stat_winner", {})
-                    winners.append({
-                        "stat_id": str(w.get("stat_id")) if w.get("stat_id") is not None else None,
-                        "winner_team_key": w.get("winner_team_key"),
-                        "is_tied": bool(w.get("is_tied")) if "is_tied" in w else False,
-                    })
-        elif isinstance(sw, dict):
-            for ik, iv in sw.items():
-                if not str(ik).isdigit() or not isinstance(iv, dict):
-                    continue
-                w = iv.get("stat_winner", {})
-                winners.append({
-                    "stat_id": str(w.get("stat_id")) if w.get("stat_id") is not None else None,
-                    "winner_team_key": w.get("winner_team_key"),
-                    "is_tied": bool(w.get("is_tied")) if "is_tied" in w else False,
-                })
-
-        # teams
         t1 = {"key": None, "name": None, "points": None, "stats": {}}
         t2 = {"key": None, "name": None, "points": None, "stats": {}}
         teams_node = m.get("teams")
@@ -553,12 +580,10 @@ def parse_scoreboard_enriched(payload: dict) -> dict:
                 tv = teams_node[idx]
                 if isinstance(tv, dict):
                     bucket.append(tv.get("team"))
-            # Now bucket ~ [team_obj_for_side1, team_obj_for_side2]
             sides = []
             for team_node in bucket:
                 if team_node is None:
                     continue
-                # team details
                 team_fields = None
                 if isinstance(team_node, list) and len(team_node) >= 1:
                     team_fields = _flatten_team_obj(team_node[0])
@@ -581,7 +606,7 @@ def parse_scoreboard_enriched(payload: dict) -> dict:
             "is_playoffs": is_playoffs,
             "team1": t1,
             "team2": t2,
-            "winners": winners,
+            "winners": [],
         })
 
     return out
