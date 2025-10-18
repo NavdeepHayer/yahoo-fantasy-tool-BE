@@ -9,6 +9,7 @@ from app.middleware.cache_log import CacheHeaderLogMiddleware
 from app.api.routes_players import router as players_router, league_router as league_stats_router
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse
+from app.api import routes_scheduling
 
 app = FastAPI(title=settings.APP_NAME,default_response_class=ORJSONResponse)
 app.add_middleware(CacheHeaderLogMiddleware)
@@ -61,6 +62,7 @@ app.include_router(routes_league.router)
 app.include_router(players_router)
 app.include_router(league_stats_router)
 app.include_router(debug_router)
+app.include_router(routes_scheduling.router)
 
 
 @app.get("/health")

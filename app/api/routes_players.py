@@ -4,6 +4,7 @@ from typing import Annotated, List, Optional, Literal, Tuple, Dict
 import heapq
 
 from fastapi import APIRouter, Depends, Query
+import requests
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db

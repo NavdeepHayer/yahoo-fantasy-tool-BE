@@ -29,6 +29,8 @@ _adapter = HTTPAdapter(
 _YAHOO_SESSION.mount("https://", _adapter)
 _YAHOO_SESSION.headers.update({"User-Agent": "YahooFantasyTool/1.0"})
 
+
+
 def _auth_headers(access_token: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {access_token}"}
 
@@ -213,3 +215,7 @@ def fetch_player_stats_with_fallback(
         raise HTTPException(status_code=400, detail=f"Unknown kind={kind!r}")
 
     return yahoo_get(db, user_id, player_path)
+
+
+
+
